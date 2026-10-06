@@ -1,13 +1,3 @@
-# Info-Kierowca — prototyp logowania z iPhone'a
-
-Cel: użytkownik potwierdza w mObywatelu żądanie rozpoczęte przez Chromium
-na serwerze. Następnie serwer sprawdza sesję Info-Kierowca przez odczyt API.
-
-**To prototyp do weryfikacji, nie potwierdzona integracja.** Nie wykonano jeszcze
-testu z prawdziwym iPhonem i kontem Info-Kierowca. Sukcesem jest dopiero wynik
-`VERIFIED` po rzeczywistym potwierdzeniu w aplikacji. Dostarczenie kodu nie dowodzi,
-że mobilny mechanizm uwierzytelniania pozwala na taki podział urządzeń.
-
 ## Co jest zaimplementowane
 
 - FastAPI, Playwright/Chromium, HTTPX i responsywny panel HTML/CSS/JS.
