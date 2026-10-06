@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="pl">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light"><title>Połącz sesję · Info-Kierowca</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><main>
+<header><span class="mark">↗</span><span>Info-Kierowca<span class="tag">Prototyp logowania</span></span></header>
+<section class="intro"><p class="eyebrow">KROK 1 · POŁĄCZENIE</p><h1>Twój telefon.<br>Sesja na serwerze.</h1><p>Sprawdzamy logowanie przez mObywatela. Potwierdzenie na telefonie ma połączyć z Info-Kierowca przeglądarkę działającą na serwerze.</p></section>
+<section class="card" aria-labelledby="status-title"><div class="status"><span id="dot"></span><h2 id="status-title">Gotowy do próby</h2></div><p id="message" role="status">Uruchom logowanie i poczekaj na przycisk otwarcia mObywatela.</p>
+<button id="start">Połącz z Info-Kierowca <span>→</span></button>
+<a id="open-app" class="primary" hidden rel="noreferrer">Otwórz mObywatela ↗</a>
+<p id="return-note" hidden>Po potwierdzeniu wróć do tej strony. Stan sprawdzimy automatycznie.</p>
+<button id="stop" class="secondary" hidden>Zakończ próbę i usuń sesję</button>
+</section>
+<section class="card evidence"><h2>Wynik testu</h2><div><span>Profil dostępny w przeglądarce serwera</span><b id="browser-check">Nie sprawdzono</b></div><div><span>Profil dostępny przez klienta HTTP</span><b id="http-check">Nie sprawdzono</b></div><p id="verified-time">Sukces pojawi się dopiero po odczycie API.</p></section>
+<details><summary>Informacje o próbie</summary><pre id="diagnostics">Brak danych.</pre></details>
+<footer>Na tym etapie aplikacja nie sprawdza terminów i nie rezerwuje egzaminów. Wynik jest potwierdzeniem wykonanej próby, nie gwarancją dalszej ważności sesji.</footer>
+</main><script src="/static/app.js"></script></body></html>

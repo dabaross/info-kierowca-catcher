@@ -1,0 +1,26 @@
+services:
+  app:
+    build: .
+    env_file: .env
+    init: true
+    shm_size: 1gb
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+  caddy:
+    image: caddy:2
+    profiles: [public]
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [app]
+volumes:
+  caddy_data:
+  caddy_config:
