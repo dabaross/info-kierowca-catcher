@@ -5,6 +5,20 @@ services:
     init: true
     shm_size: 1gb
     restart: unless-stopped
+    environment:
+      DATA_DIR: /app/data
+    volumes:
+      - app_data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     ports:
       - "127.0.0.1:8000:8000"
   caddy:
@@ -22,5 +36,6 @@ services:
       - caddy_config:/config
     depends_on: [app]
 volumes:
+  app_data:
   caddy_data:
   caddy_config:

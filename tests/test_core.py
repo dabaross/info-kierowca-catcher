@@ -1,6 +1,6 @@
 import unittest
 
-from poc.core import Attempt, accepted_handoff, portal_cookies, profile_response_valid
+from poc.core import PROFILE_PATH, Attempt, accepted_handoff, portal_cookies, profile_response_valid
 
 
 class CoreTests(unittest.TestCase):
@@ -26,9 +26,14 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(cookies[0].secure)
 
     def test_profile_schema_and_finished_link_redaction(self):
+        self.assertEqual(PROFILE_PATH, "/bknd/exam/api/v1/pkk/get_profiles_for_reservation")
         self.assertTrue(profile_response_valid([]))
         self.assertTrue(profile_response_valid([{"pkkNumber": "dummy", "categoryName": "B"}]))
+        self.assertTrue(profile_response_valid([{
+            "pkkNumber":"1234","categoryName":"b","firstName":"private",
+        }]))
         self.assertFalse(profile_response_valid({"error": "unauthorized"}))
         self.assertFalse(profile_response_valid([{}]))
+        self.assertFalse(profile_response_valid([{"pkkNumber":"1234"}]))
         attempt = Attempt("test", handoff_url="mobywatel://test", finished=True)
         self.assertIsNone(attempt.public()["handoff_url"])

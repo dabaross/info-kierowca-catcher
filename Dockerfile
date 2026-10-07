@@ -5,6 +5,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && python -m playwright install --with-deps chromium \
     && useradd --create-home --uid 10001 poc
+RUN mkdir -p /app/data && chown poc:poc /app/data && chmod 700 /app/data
 COPY --chown=poc:poc . .
 USER poc
 EXPOSE 8000

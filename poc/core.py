@@ -7,7 +7,7 @@ from http.cookiejar import Cookie, CookieJar
 from urllib.parse import urlsplit
 
 INFO_ORIGIN = "https://info-kierowca.pl"
-PROFILE_PATH = "/bknd/status/api/v1/pkk/get_profiles_for_reservation"
+PROFILE_PATH = "/bknd/exam/api/v1/pkk/get_profiles_for_reservation"
 AUTH_HOST = "login.mobywatel.gov.pl"
 
 
@@ -33,7 +33,6 @@ def accepted_handoff(url: str, source: str, schemes: set[str]) -> bool:
 
 
 def profile_response_valid(data: object) -> bool:
-    # An authenticated account may have no PKK yet. Never display the profile body.
     return isinstance(data, list) and all(
         isinstance(row, dict) and "pkkNumber" in row and "categoryName" in row
         for row in data

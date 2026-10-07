@@ -19,7 +19,8 @@ from .core import (
 class LoginController:
     """One owner, one login at a time; ephemeral browser, HTTP cookies in RAM."""
 
-    def __init__(self, schemes: set[str], headed: bool = False):
+    def __init__(self, schemes: set[str], headed: bool = False, sessions=None):
+        self.sessions = sessions
         self.schemes = schemes
         self.headed = headed
         self.attempt: Attempt | None = None
@@ -31,7 +32,8 @@ class LoginController:
         async with self.lock:
             if self.task and not self.task.done():
                 return self.attempt
-            await self._clear_client()
+            if not self.sessions:
+                await self._clear_client()
             attempt = Attempt(id=secrets.token_urlsafe(18))
             self.attempt = attempt
             self.task = asyncio.create_task(self._run(attempt))
@@ -46,7 +48,7 @@ class LoginController:
             await self._clear_client()
             if self.attempt:
                 self.attempt.state = "STOPPED"
-                self.attempt.message = "Próba zakończona. Lokalna kopia sesji została usunięta."
+                self.attempt.message = "Próba logowania zakończona."
                 self.attempt.handoff_url = None
                 self.attempt.finished = True
 
@@ -111,7 +113,11 @@ class LoginController:
                             return
                         if current_host == AUTH_HOST:
                             # Never derive a new URI from the token; use actual page links only.
-                            urls = await page.locator("a[href]").evaluate_all("els => els.map(e => e.href)")
+                            # Confirmation may redirect this page while Playwright evaluates the DOM.
+                            # That transient condition is not an authentication failure.
+                            urls = []
+                            with suppress(BrowserError):
+                                urls = await page.locator("a[href]").evaluate_all("els => els.map(e => e.href)")
                             for url in urls:
                                 self._observe(attempt, url, page.url, "official_page_anchor")
                             if not attempt.handoff_url:
@@ -204,7 +210,11 @@ class LoginController:
             attempt.verified_at = datetime.now(timezone.utc).isoformat()
             attempt.state = "VERIFIED"
             attempt.message = "Test udany: serwer odczytał profil także niezależnym klientem HTTP."
-            self.client = client
+            if self.sessions:
+                await self.sessions.install(client, result.json())
+                attempt.message = "Sesja aktywna. Możesz monitorować terminy."
+            else:
+                self.client = client
             client = None
         except httpx.HTTPError:
             attempt.state = "BROWSER_ONLY"
