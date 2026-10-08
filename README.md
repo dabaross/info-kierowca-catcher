@@ -137,7 +137,7 @@ Dotychczasowy proces logowania został potwierdzony przez właściciela na VPS. 
 
 To aplikacja **jednego właściciela**, nie gotowy publiczny SaaS. Wiersze są przypisane do właściciela, ale przyszłe udostępnienie wielu osobom wymaga prawdziwych kont, izolowanych menedżerów sesji i workerów, ograniczeń per konto, bezpiecznego zarządzania sekretami, polityki retencji oraz przeglądu warunków integracji. Nie uruchamiaj kilku workerów Uvicorn ani replik — zdublowałyby monitoring. Konta, PostgreSQL i Redis nie są potrzebne do tej wersji.
 
-## Źródła referencyjne
+## Źródła 
 
 - https://github.com/losipiuk/examcatch — struktura odczytu terminarza i reakcje na limity, nie źródło prawdy o naszym UX logowania.
 - https://github.com/WioN780/auto-book-info-kierowca — odnowienie JWT i okna terminarza; nie skopiowano funkcji rezerwacji.
