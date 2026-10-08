@@ -41,16 +41,23 @@ function readConfig(){
 }
 async function save(){
   if(!$('configForm').reportValidity())throw new Error('Uzupełnij daty i godziny.');
+  if(Number($('center').value)!==43)throw new Error('W tej wersji wybierz PORD Gdańsk, aby zapisać konfigurację.');
   const config=await api('config','PUT',readConfig());dirty=false;$('dirty').hidden=true;state.monitor.config=config;toast('Preferencje zapisane.');
 }
-const statusLabels={PAUSED:'Wstrzymany',NEEDS_LOGIN:'Czeka na login',NEEDS_PROFILE:'Wybierz profil',WAITING:'Oczekuje',CHECKING:'Sprawdzamy…',WATCHING:'Aktywny',FINISHED:'Zakończony',RATE_LIMITED:'Limit zapytań',NETWORK:'Brak odpowiedzi',UPSTREAM:'Błąd portalu',SCHEMA:'Zmiana API',ERROR:'Błąd monitora'};
+const statusLabels={PAUSED:'Wstrzymany',NEEDS_LOGIN:'Czeka na login',NEEDS_PROFILE:'Wybierz profil',NEEDS_CENTER:'Wybierz PORD Gdańsk',WAITING:'Oczekuje',CHECKING:'Sprawdzamy…',WATCHING:'Aktywny',FINISHED:'Zakończony',RATE_LIMITED:'Limit zapytań',NETWORK:'Brak odpowiedzi',UPSTREAM:'Błąd portalu',HTTP_400:'HTTP 400 · próby wstrzymane',SCHEMA:'Zmiana API',ERROR:'Błąd monitora'};
 async function refresh(){
   if(polling)return;polling=true;
   try {
     const data=await api('status');state=data;
     if(!loaded){
-      const centers=await api('centers');$('center').replaceChildren(...centers.map(c=>{const option=el('option',c.name);option.value=c.id;return option;}));
-      $('center').value=data.monitor.config.center_id;$('interval').value=data.monitor.config.interval_seconds;
+      const centers=await api('centers'),placeholder=el('option','Wybierz ośrodek');placeholder.value='';placeholder.disabled=true;
+      $('center').replaceChildren(placeholder,...centers.map(c=>{const option=el('option',c.name);option.value=c.id;return option;}));
+      $('center').value=String(data.monitor.config.center_id);
+      if($('center').value!=='43'){$('center').value='';$('centerNotice').textContent='Zapisana konfiguracja wskazuje inny ośrodek. Ustaw PORD Gdańsk i zapisz, aby wznowić monitoring; dotychczasowe ustawienia i dane pozostają zachowane.';$('centerNotice').hidden=false;}
+      else {$('centerNotice').hidden=true;}
+      $('center').addEventListener('change',()=>{if(Number($('center').value)===43)$('centerNotice').hidden=true;});
+      $('center').addEventListener('change',()=>{if(Number($('center').value)===43)$('centerNotice').hidden=true;});
+      $('interval').value=data.monitor.config.interval_seconds;
       $('ranges').replaceChildren();data.monitor.config.ranges.forEach(addRange);dirty=false;$('dirty').hidden=true;profileSignature='';loaded=true;
     }
     $('loginPanel').hidden=true;$('dashboard').hidden=false;$('logout').hidden=false;$('connection').hidden=true;
@@ -74,17 +81,17 @@ async function refresh(){
       profileSignature=signature;
     }
     $('monitorStatus').textContent=statusLabels[m.state]||m.state;
-    $('nextCheck').textContent=m.enabled&&s.active?`Kolejny odczyt: ${m.next_check>Date.now()/1000?clock(m.next_check):'wkrótce'}`:'Ustawienia zapisane na serwerze';
+    $('nextCheck').textContent=m.state==='HTTP_400'?'Automatyczne próby wstrzymane':m.state==='NEEDS_LOGIN'?'Wymaga ponownego logowania':m.state==='NEEDS_PROFILE'?'Wymaga wyboru profilu PKK':m.state==='NEEDS_CENTER'?'Wymaga wyboru PORD Gdańsk':m.enabled&&s.active?`Kolejna próba: ${m.next_check>Date.now()/1000?clock(m.next_check):'wkrótce'}`:'Ustawienia zapisane na serwerze';
     $('slotCount').textContent=m.slots.length;
-    $('lastCheck').textContent=m.last_check?'Ostatni odczyt: '+clock(m.last_check):'Jeszcze nie sprawdzono';
+    $('lastCheck').textContent=m.last_check?'Ostatni udany odczyt: '+clock(m.last_check):'Brak zarejestrowanego udanego odczytu';
     $('monitorMessage').textContent=m.message;
     $('monitorToggle').textContent=m.enabled?'Wstrzymaj monitoring':'Uruchom monitoring';
     const slots=m.slots.map(slot=>{const card=el('article',undefined,'slot'),left=el('div');left.append(el('strong',fmt(slot.start,{day:'numeric',month:'long',weekday:'short'})),el('small',`Miejsca: ${slot.places} · odczyt ${clock(slot.checked_at)}`));const t=el('time',clock(slot.start));t.dateTime=slot.start;card.append(left,t);return card;});
-    if(!slots.length){const empty=el('div',undefined,'empty');empty.append(el('span','⌁'),el('div',m.last_check?'Brak pasujących terminów w odczytanych oknach.':'Terminy pojawią się po pierwszym odczycie.'));slots.push(empty);}
+    if(!slots.length){const empty=el('div',undefined,'empty'),emptyMessage=m.state==='HTTP_400'?'Odczyt nie powiódł się (HTTP 400); wyników nie zaktualizowano.':m.last_check?'Brak pasujących terminów w odczytanych oknach.':'Terminy pojawią się po pierwszym odczycie.';empty.append(el('span','⌁'),el('div',emptyMessage));slots.push(empty);}
     $('slots').replaceChildren(...slots);
     $('coverage').textContent=`Odczytane okna: ${m.windows.length}/${m.windows_total}. `+m.windows.map(w=>`${w.from}–${w.to} (${clock(w.at)})`).join(' · ');
     $('events').replaceChildren(...data.events.slice(0,15).map(e=>{const li=el('li');li.append(el('time',fmt(e.at,{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})),el('span',e.message));return li;}));
-    $('diagnostics').textContent=JSON.stringify({monitor:m.state,http:m.http_status,last_verified:s.last_verified,login:l?.diagnostics||{},push:p.last_result},null,2);
+    $('diagnostics').textContent=JSON.stringify({monitor:m.state,http:m.http_status,validation:m.diagnostic||null,last_successful_schedule_at:m.last_check,next_schedule_attempt_at:m.next_check||null,request_policy:m.request_policy,last_verified:s.last_verified,login:l?.diagnostics||{},push:p.last_result},null,2);
     pushKey=p.public_key;
     $('enablePush').disabled=!reg||!('PushManager' in window);
     $('pushState').textContent=(!('PushManager' in window)?'Ta przeglądarka nie udostępnia Web Push. Na iPhonie otwórz aplikację z ekranu początkowego. ': '')+`Zapisane urządzenia: ${p.devices}.`+(p.last_result?` Ostatnia wysyłka: ${p.last_result.accepted?'przyjęta przez serwer push':'nieudana'}.`:'');

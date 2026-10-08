@@ -4,23 +4,40 @@ Wersja 1.0: działający wcześniej proces logowania mObywatel na iPhonie → Ch
 
 ## Aktualizacja istniejącego VPS
 
-Pobierz `info-kierowca-app.zip` do `~/Downloads` na komputerze. W terminalu komputera:
+Pobierz `info-kierowca-app-pord43-2026-10-08.zip` do `~/Downloads` na komputerze. W terminalu komputera:
 
 ```bash
-scp -i ~/Downloads/ssh-key-2026-10-06.key ~/Downloads/info-kierowca-app.zip ubuntu@130.61.102.33:/home/ubuntu/
+scp -i ~/Downloads/ssh-key-2026-10-06.key ~/Downloads/info-kierowca-app-pord43-2026-10-08.zip ubuntu@130.61.102.33:/home/ubuntu/
 ssh -i ~/Downloads/ssh-key-2026-10-06.key ubuntu@130.61.102.33
 ```
 
 Następnie na Ubuntu:
 
 ```bash
+cd /home/ubuntu/info-kierowca-app
+bash backup.sh
 cd /home/ubuntu
-unzip -o info-kierowca-app.zip
+cp -a info-kierowca-app info-kierowca-app.rollback
+unzip -o info-kierowca-app-pord43-2026-10-08.zip
 cd info-kierowca-app
 bash update.sh
 ```
 
 Skrypt kopiuje konfigurację ze starego `/home/ubuntu/info-login-poc/.env`, jeżeli nowy folder jeszcze jej nie ma. Buduje obraz przed zmianą kontenerów i uruchamia ten sam projekt Compose `info-login-poc`, dzięki czemu zachowuje wolumeny Caddy. Stare źródła zostają w poprzednim folderze. Nie używaj `docker compose down -v`, bo usuwa dane.
+
+Paczka `info-kierowca-app-pord43-2026-10-08.zip` zawiera pliki aplikacji, ale celowo nie zawiera `.env`, bazy, kluczy Web Push ani certyfikatów Caddy. Wypakuj ją do istniejącego katalogu aplikacji bez usuwania plików; aktualizacja używa dotychczasowych wolumenów `app_data`, `caddy_data` i `caddy_config`.
+
+Jeśli aktualizacja wymaga cofnięcia, zachowaj nowy katalog, przywróć kopię źródeł i przebuduj aplikację:
+
+```bash
+cd /home/ubuntu
+mv info-kierowca-app info-kierowca-app.failed
+cp -a info-kierowca-app.rollback info-kierowca-app
+cd /home/ubuntu/info-kierowca-app
+bash update.sh
+```
+
+Nie odtwarzaj starej bazy ani kluczy, jeśli nie ma takiej potrzeby; wolumeny i klucze pozostaw bez zmian. Gdyby konieczne było przywrócenie bazy, użyj kopii wykonanej przed aktualizacją z zachowaniem zgodnego `storage.key` i `vapid.pem`.
 
 Adres pozostaje **https://130-61-102-33.sslip.io**. Hasło pozostaje takie jak ustawione wcześniej. Teraz wpisuje się je w formularzu panelu, bez nazwy użytkownika. Otwórz stronę ponownie lub odśwież ją po aktualizacji. Trzeba ponownie potwierdzić sesję Info-Kierowca, ponieważ sesje portalu celowo żyją tylko w pamięci.
 
@@ -37,13 +54,17 @@ Jeżeli nie masz `unzip`: `sudo apt-get install -y unzip`.
 ## Zasady dopasowania i odczytu
 
 - Jeden ośrodek i jeden profil PKK naraz; maksymalnie 10 przedziałów. Całość mieści się w okresie 60 dni.
+- Ta wersja obsługuje wyłącznie PORD Gdańsk (ID 43). Jeżeli dotychczasowa konfiguracja wskazuje inny ośrodek, pozostaje zapisana, ale wymaga wybrania Gdańska przed wznowieniem odczytów.
 - Termin spełnia **dowolny jeden** kompletny przedział: data ORAZ dzień tygodnia ORAZ godzina. Granice włącznie. Godziny w `Europe/Warsaw`, z obsługą zmiany czasu. Zakres przez północ trzeba rozdzielić na dwa przedziały.
 - Tylko przyszłe egzaminy praktyczne z wolnymi miejscami. Profil i kategoria pochodzą z zalogowanego konta. Lista ośrodków jest lokalnym katalogiem referencyjnym i może wymagać aktualizacji.
 - Nakładające się przedziały nie dublują wyników ani powiadomień. Termin identyfikowany jest przez ośrodek i identyfikator egzaminu. Ten sam termin dla tego samego profilu nie wywołuje ponownego alertu przez 60 dni, także po restarcie lub zmianie filtrów.
-- Domyślnie jeden odczyt co 6 minut. To zachowawcze ustawienie aplikacji, nie gwarantowany oficjalny limit. Nie pozwalamy zejść poniżej 6 minut. Odpowiedź 429 i nagłówki limitu przedłużają oczekiwanie. Limity są zapisane w bazie i przeżywają restart oraz klikanie start/stop.
-- Odczyt API obejmuje okna do 20 dni, sprawdzane kolejno. Przy 3 oknach i odstępie 6 minut pełny cykl trwa około 18 minut. Przerwy między przedziałami mogą być objęte odczytem, lecz są odfiltrowane z wyników.
+- Domyślnie jeden odczyt terminarza co 20 minut (3 razy na godzinę); można wybrać 15, 20, 30 albo 60 minut. Backend odrzuca interwał poniżej 15 minut. Zapisane wcześniej ustawienia 6/10 minut migrują do 20 minut; pozostałe preferencje są zachowane. Po aktualizacji już włączony monitor bez zapisanego czasu poprzedniego odczytu czeka jeden pełny interwał, a następnie wraca do harmonogramu. Poprzednia wersja nie utrwalała czasu ostatniego udanego odczytu, więc przed pierwszym nowym HTTP 200 panel nie może pokazać historycznego czasu. Kolejne udane odczyty i plan następnej próby są trwałe. Po błędzie innym niż 400/429 dotychczasowe wykładnicze ponawianie zaczyna się po 6 minutach i rośnie do maksymalnie 60 minut; to tryb błędu, nie skonfigurowany normalny interwał.
+- Odczyt API obejmuje okna do 20 dni, sprawdzane kolejno. Przy 3 oknach i odstępie 20 minut pełny cykl trwa około 60 minut. Przerwy między przedziałami mogą być objęte odczytem, lecz są odfiltrowane z wyników.
+- Odczyt terminarza nie jest jedynym ruchem do portalu: przy aktywnej sesji monitor sprawdza odświeżenie JWT co najmniej co 8 minut, również gdy monitoring terminarza jest wyłączony. Po odpowiedzi odświeżenia innej niż 200/204 (z wyjątkiem 401/403/przekierowań oraz 429, które mają własną obsługę) wykonuje kontrolny GET profilu; profil jest też sprawdzany w procesie logowania (odczyt w przeglądarce, kontrola anonimowa i niezależna weryfikacja klienta HTTP). Przy niezmienionym tokenie to do 7–8 prób odświeżenia na godzinę plus maksymalnie 3 odczyty terminarza na godzinę w normalnej pracy, a GET profilu zależy od niepowodzeń odświeżenia i logowania. Błędy terminarza inne niż 400/429 uruchamiają dodatkowo opisany wyżej backoff. Limity 429, `Retry-After` i `X-RateLimit-Reset` nadal wydłużają oczekiwanie; nie należy przyspieszać prób.
+- `WATCHING` z licznikiem 0 oznacza poprawny HTTP 200 bez pasujących terminów. `NEEDS_LOGIN` wymaga ponownego potwierdzenia sesji, `RATE_LIMITED` pokazuje oczekiwanie z limitu portalu, `NETWORK` oznacza brak odpowiedzi, `SCHEMA` nieznany format, a HTTP 400 ma osobny stan i zatrzymuje dalsze zapytania terminarza. Panel pokazuje ostatni zarejestrowany udany odczyt oraz plan następnej próby; przy blokadzie 400 wyświetla zamiast niego informację, że próby są wstrzymane.
 - Każdy wynik i okno pokazują czas ostatniego odczytu. Brak odczytu lub błąd nie oznaczają braku terminów. Wyniki są migawką, bez gwarancji dostępności w momencie rezerwacji.
-- Lista profili i odczyt terminarza używają ścieżek przechwyconych z oficjalnego panelu. POST `MultipleCentersExams` wysyła datę początkową, wybrany ośrodek, indeks kategorii, numer PKK i typ profilu `Pkk`. Odpowiedź wieloośrodkowa jest filtrowana do praktycznych terminów z wolnymi miejscami i kategorią zgodną z profilem. Aplikacja nie rezerwuje terminów automatycznie.
+- Lista profili i odczyt terminarza używają ścieżek przechwyconych z oficjalnego panelu. Jedno żądanie POST `MultipleCentersExams` wysyła `organizationId: [43, 42, 53, 73, 9]`, datę początkową, numeryczny indeks kategorii, numer PKK i typ profilu `Pkk`. Z odpowiedzi przetwarzane i pokazywane są wyłącznie terminy z `wordId` 43 i — jeżeli pole występuje — `organizationId` 43. Pozostałe WORD-y nie trafiają do licznika ani powiadomień. Aplikacja nie rezerwuje terminów automatycznie.
+- Odpowiedź HTTP 400 nie oznacza braku terminów: zatrzymuje automatyczne próby także po restarcie. Blokadę można zdjąć przez zapis konfiguracji lub świadome ponowne uruchomienie monitora. Diagnostyka pokazuje wyłącznie bezpieczny identyfikator walidacji (jeśli portal zwróci rozpoznawalny kod); nie przechowuje treści odpowiedzi. To hipoteza, że lista pięciu ID pomoże — wymaga jednej kontrolowanej próby odczytu po aktualizacji; nie gwarantuje usunięcia błędu 400.
 - Przed wygaśnięciem sesji pokazujemy czas od logowania i wysyłamy przypomnienie po 50 minutach. Nie udajemy znajomości dokładnego czasu wygaśnięcia. Odświeżanie JWT nie gwarantuje przedłużenia całej sesji.
 
 ## Sesja i powiadomienia

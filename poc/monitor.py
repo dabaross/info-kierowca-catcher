@@ -3,15 +3,20 @@ import time
 from contextlib import suppress
 from datetime import datetime
 
-from .models import now_local, parse_schedule
-from .session import PortalError, SCHEDULE_PATH
+from .models import PORD_GDANSK_ID, now_local, parse_schedule
+from .session import PortalError, REFRESH_INTERVAL_SECONDS, SCHEDULE_PATH
+
+FAILURE_BACKOFF_SECONDS = 360
+MAX_FAILURE_BACKOFF_SECONDS = 3600
 
 MESSAGES = {
     "NEEDS_LOGIN": "Potwierdź logowanie w mObywatelu, aby wznowić monitoring.",
     "NEEDS_PROFILE": "Wybierz profil PKK dostępny na aktualnie zalogowanym koncie.",
+    "NEEDS_CENTER": "Ta wersja monitoruje wyłącznie PORD Gdańsk. Wybierz Gdańsk i zapisz konfigurację.",
     "NETWORK": "Info-Kierowca nie odpowiada. Spróbujemy ponownie.",
     "RATE_LIMITED": "Limit zapytań Info-Kierowca. Czekamy przed kolejną próbą.",
     "UPSTREAM": "Portal odrzucił odczyt terminarza. Sprawdź kod HTTP w diagnostyce.",
+    "HTTP_400": "Portal odrzucił żądanie terminarza (HTTP 400). Automatyczne próby wstrzymano. Zapisz poprawioną konfigurację albo świadomie uruchom monitor ponownie. Treść odpowiedzi nie jest zapisywana; do dalszej diagnozy potrzebny jest bezpieczny kod/nazwa błędu walidacji.",
     "SCHEMA": "Portal zwrócił nieznany format terminarza. Potrzebna aktualizacja adaptera.",
 }
 
@@ -21,11 +26,22 @@ class Monitor:
         self.store, self.sessions, self.push = store, sessions, push
         self.config, self.enabled = store.settings()
         self.revision = 0
-        self.state = "NEEDS_LOGIN" if self.enabled else "PAUSED"
-        self.message = "Monitoring czeka na zalogowanie." if self.enabled else "Ustaw filtry i uruchom monitoring."
-        self.next_check = 0
-        self.last_check = None
+        self.state = "NEEDS_CENTER" if self.config.center_id != PORD_GDANSK_ID else ("NEEDS_LOGIN" if self.enabled else "PAUSED")
+        self.message = MESSAGES["NEEDS_CENTER"] if self.config.center_id != PORD_GDANSK_ID else ("Monitoring czeka na zalogowanie." if self.enabled else "Ustaw filtry i uruchom monitoring.")
+        timing = store.schedule_timing()
+        self.last_check = timing["last_success"] if timing else None
+        self.next_check = timing["next_check"] if timing else 0
         self.error_status = None
+        self.diagnostic = None
+        blocked = store.schedule_block()
+        if blocked and self.config.center_id == PORD_GDANSK_ID:
+            self.state = "HTTP_400"
+            self.message = MESSAGES["HTTP_400"]
+            self.error_status = blocked["status"]
+            self.diagnostic = blocked["diagnostic"] or None
+        elif self.enabled and self.config.center_id == PORD_GDANSK_ID and timing is None:
+            self.next_check = time.time() + self.config.interval_seconds
+            store.save_schedule_timing(None, self.next_check)
         self.window_index = 0
         self.snapshots = {}
         self.task = None
@@ -38,7 +54,20 @@ class Monitor:
         self.revision += 1
         self.window_index = 0
         self.snapshots = {}
-        self.last_check = None
+        block = self.store.schedule_block()
+        self.store.clear_schedule_block()
+        self.error_status = self.diagnostic = None
+        if block or self.config.center_id != PORD_GDANSK_ID:
+            self.next_check = 0
+        elif self.last_check is not None:
+            self.next_check = max(self.next_check, self.last_check + config.interval_seconds)
+        if self.config.center_id != PORD_GDANSK_ID:
+            self.state, self.message = "NEEDS_CENTER", MESSAGES["NEEDS_CENTER"]
+        elif self.enabled:
+            self.state, self.message = "WAITING", "Konfiguracja zapisana. Oczekujemy na odczyt."
+        else:
+            self.state, self.message = "PAUSED", "Ustawienia zapisane. Uruchom monitoring."
+        self.store.save_schedule_timing(self.last_check, self.next_check)
         self.store.save_settings(config, self.enabled)
         self.store.event("config", "Zapisano filtry monitorowania.")
 
@@ -46,8 +75,17 @@ class Monitor:
         self.enabled = enabled
         self.revision += 1
         self.store.save_settings(self.config, enabled)
-        self.state = "WAITING" if enabled else "PAUSED"
-        self.message = "Monitoring uruchomiony." if enabled else "Monitoring wstrzymany."
+        if enabled:
+            self.store.clear_schedule_block()
+            self.error_status = self.diagnostic = None
+            self.failures = 0
+            self.next_check = 0
+        if self.config.center_id != PORD_GDANSK_ID:
+            self.state, self.message = "NEEDS_CENTER", MESSAGES["NEEDS_CENTER"]
+        else:
+            self.state = "WAITING" if enabled else "PAUSED"
+            self.message = "Monitoring uruchomiony." if enabled else "Monitoring wstrzymany."
+        self.store.save_schedule_timing(self.last_check, self.next_check)
         self.store.event("monitor", self.message)
 
     def public(self):
@@ -56,10 +94,19 @@ class Monitor:
         # Window starts don't overlap; keys protect against upstream duplicate entries.
         unique = list({s["key"]: s for s in slots}.values())
         return {"enabled": self.enabled, "state": self.state, "message": self.message,
-                "next_check": max(self.next_check, self.store.cooldown(SCHEDULE_PATH)),
+                "next_check": 0 if self.state == "HTTP_400" else max(self.next_check, self.store.cooldown(SCHEDULE_PATH)),
                 "last_check": self.last_check, "http_status": self.error_status,
+                "diagnostic": self.diagnostic,
                 "slots": unique, "windows_total": len(windows), "windows": list(self.snapshots.values()),
-                "config": self.config.model_dump(mode="json")}
+                "config": self.config.model_dump(mode="json"),
+                "request_policy": {
+                    "schedule_interval_seconds": self.config.interval_seconds,
+                    "jwt_refresh_min_interval_seconds": REFRESH_INTERVAL_SECONDS,
+                    "schedule_error_backoff_initial_seconds": FAILURE_BACKOFF_SECONDS,
+                    "schedule_error_backoff_max_seconds": MAX_FAILURE_BACKOFF_SECONDS,
+                    "rate_limit_headers": ["Retry-After", "X-RateLimit-Reset"],
+                    "profile_check": "Przy logowaniu (weryfikacja przeglądarki i klienta oraz kontrola anonimowa) i po odpowiedzi refresh innej niż 200/204.",
+                }}
 
     def start(self):
         self.task = asyncio.create_task(self.run())
@@ -83,10 +130,18 @@ class Monitor:
             self.generation = self.sessions.generation
             self.expiry_notified = False
             self.snapshots = {}
-            self.last_check = None
             self.window_index = 0
             self.store.event("session", "Nowa sesja gotowa. Zachowano ustawienia monitorowania.")
         if not self.enabled:
+            return
+        if self.config.center_id != PORD_GDANSK_ID:
+            self.state, self.message = "NEEDS_CENTER", MESSAGES["NEEDS_CENTER"]
+            return
+        blocked = self.store.schedule_block()
+        if blocked:
+            self.state, self.message = "HTTP_400", MESSAGES["HTTP_400"]
+            self.error_status = blocked["status"]
+            self.diagnostic = blocked["diagnostic"] or None
             return
         if not self.sessions.client:
             self.login_needed()
@@ -110,6 +165,8 @@ class Monitor:
         config, revision = self.config, self.revision
         start, end = windows[self.window_index % len(windows)]
         self.state, self.message = "CHECKING", "Sprawdzamy wolne terminy…"
+        self.next_check = time.time() + config.interval_seconds
+        self.store.save_schedule_timing(self.last_check, self.next_check)
         try:
             raw = await self.sessions.schedule(config.profile_id, config.center_id, start)
             try:
@@ -128,6 +185,7 @@ class Monitor:
             self.snapshots = {k:v for k,v in self.snapshots.items() if k in allowed_windows}
             self.snapshots[start.isoformat()] = {"from": start.isoformat(), "to": end.isoformat(), "at": at, "slots": matches}
             self.last_check, self.error_status = at, None
+            self.diagnostic = None
             self.window_index = (self.window_index + 1) % len(windows)
             self.failures = 0
             self.state = "WATCHING"
@@ -139,12 +197,23 @@ class Monitor:
             new = self.store.record_matches(config.profile_id, matches, payload)
             self.store.event("match" if new else "check", f"{start} – {end}: {len(matches)} pasujących, {len(new)} nowych.")
             self.next_check = at + config.interval_seconds
+            self.store.save_schedule_timing(at, self.next_check)
         except PortalError as exc:
             if revision != self.revision:
                 return
             self.state, self.message, self.error_status = exc.code, MESSAGES[exc.code], exc.status
+            self.diagnostic = exc.diagnostic
+            if exc.diagnostic:
+                self.message += f" Kod walidacji portalu: {exc.diagnostic}."
             self.failures += 1
-            self.next_check = max(time.time()+min(360*2**min(self.failures-1,3),3600), exc.until)
+            if exc.code == "HTTP_400":
+                self.store.block_schedule(exc.status, exc.diagnostic)
+                self.next_check = 0
+            else:
+                backoff = min(FAILURE_BACKOFF_SECONDS*2**min(self.failures-1,3),
+                              MAX_FAILURE_BACKOFF_SECONDS)
+                self.next_check = max(time.time()+backoff, exc.until)
+            self.store.save_schedule_timing(self.last_check, self.next_check)
             if exc.code == "NEEDS_LOGIN":
                 self.login_needed()
             else:

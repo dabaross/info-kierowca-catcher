@@ -1,4 +1,6 @@
 import asyncio
+import re
+from collections.abc import Mapping
 import hashlib
 import hmac
 import time
@@ -9,17 +11,39 @@ from email.utils import parsedate_to_datetime
 import httpx
 
 from .core import INFO_ORIGIN, PROFILE_PATH, profile_response_valid
-from .models import CATEGORIES
+from .models import CATEGORIES, PORD_GDANSK_ID
 
 SCHEDULE_PATH = "/bknd/exam/api/v1/Schedules/user/MultipleCentersExams"
+SCHEDULE_CENTER_IDS = [43, 42, 53, 73, 9]
 REFRESH_PATH = "/bknd/auth/api/v1/jwt/refresh"
+REFRESH_INTERVAL_SECONDS = 8 * 60
 ALLOWED = {("GET", PROFILE_PATH), ("GET", REFRESH_PATH), ("POST", SCHEDULE_PATH)}
 
 
 class PortalError(Exception):
-    def __init__(self, code, status=None, until=0):
+    def __init__(self, code, status=None, until=0, diagnostic=None):
         super().__init__(code)
-        self.code, self.status, self.until = code, status, until
+        self.code, self.status, self.until, self.diagnostic = code, status, until, diagnostic
+
+
+def safe_validation_identifier(response):
+    if len(response.content) > 8192:
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, Mapping):
+        return None
+    candidates = [body]
+    if isinstance(body.get("error"), Mapping):
+        candidates.append(body["error"])
+    for candidate in candidates:
+        for key in ("errorCode", "errorName", "code"):
+            value = candidate.get(key)
+            if (isinstance(value, str) and re.fullmatch(r"[A-Z][A-Z_]{1,63}", value)):
+                return value
+    return None
 
 
 def backoff_until(headers, now):
@@ -39,10 +63,10 @@ def backoff_until(headers, now):
     return max(deadlines)
 
 
-def build_schedule_payload(profile: dict, center_ids: list[int], start: date) -> dict:
+def build_schedule_payload(profile: dict, start: date) -> dict:
     return {
         "startDate": start.isoformat(),
-        "organizationId": center_ids,
+        "organizationId": SCHEDULE_CENTER_IDS.copy(),
         "category": CATEGORIES.index(profile["category"]),
         "profileNumber": profile["number"],
         "profileType": "Pkk",
@@ -134,7 +158,7 @@ class Sessions:
         self.last_verified = time.time()
 
     async def _refresh(self):
-        if time.time() - self.last_refresh < 480:
+        if time.time() - self.last_refresh < REFRESH_INTERVAL_SECONDS:
             return
         self.last_refresh = time.time()
         result = await self._call("GET", REFRESH_PATH)
@@ -157,13 +181,18 @@ class Sessions:
                 raise PortalError("NEEDS_LOGIN")
             if profile_id not in self.profiles:
                 raise PortalError("NEEDS_PROFILE")
+            if center_id != PORD_GDANSK_ID:
+                raise PortalError("NEEDS_CENTER")
             await self._refresh()
             p = self.profiles[profile_id]
-            body = build_schedule_payload(p, [center_id], start)
+            body = build_schedule_payload(p, start)
             result = await self._call("POST", SCHEDULE_PATH, body)
             if result.status_code in {401, 403} or result.is_redirect:
                 await self._expire()
                 raise PortalError("NEEDS_LOGIN", result.status_code)
+            if result.status_code == 400:
+                raise PortalError("HTTP_400", 400,
+                                  diagnostic=safe_validation_identifier(result))
             if result.status_code != 200:
                 raise PortalError("UPSTREAM", result.status_code)
             try:

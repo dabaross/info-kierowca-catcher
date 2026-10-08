@@ -8,9 +8,12 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 WARSAW = ZoneInfo("Europe/Warsaw")
+PORD_GDANSK_ID = 43
 CATEGORIES = "AM A1 A2 A B1 B C1 C D1 D B+E C1+E C+E D1+E D+E T PT".split()
 CENTERS = json.loads(Path(__file__).with_name("centers.json").read_text())
 CENTER_IDS = {c["id"] for c in CENTERS}
+MIN_INTERVAL_SECONDS = 15 * 60
+DEFAULT_INTERVAL_SECONDS = 20 * 60
 
 
 def now_local():
@@ -41,7 +44,8 @@ class MonitorConfig(BaseModel):
     center_id: int = 43
     profile_id: str = Field(default="", max_length=64)
     ranges: list[TimeRange] = Field(default_factory=lambda: [TimeRange()], min_length=1, max_length=10)
-    interval_seconds: int = Field(default=360, ge=360, le=3600)
+    interval_seconds: int = Field(default=DEFAULT_INTERVAL_SECONDS,
+                                  ge=MIN_INTERVAL_SECONDS, le=3600)
 
     @model_validator(mode="before")
     @classmethod
@@ -85,17 +89,32 @@ def parse_schedule(data, expected_category: str) -> list[dict]:
     found = {}
     expected_category = expected_category.upper()
     for center in data:
-        if (not isinstance(center, dict) or "wordId" not in center
-                or "wordName" not in center or "examCollectionForDay" not in center
-                or not isinstance(center["examCollectionForDay"], list)):
+        if not isinstance(center, dict) or "wordId" not in center:
             raise ValueError("schedule_center")
         try:
             center_id = int(center["wordId"])
         except (TypeError, ValueError, OverflowError):
             raise ValueError("schedule_center_id") from None
+        if center_id != PORD_GDANSK_ID:
+            continue
+        if ("wordName" not in center or "examCollectionForDay" not in center
+                or not isinstance(center["examCollectionForDay"], list)):
+            raise ValueError("schedule_center")
         center_name = str(center["wordName"])
         for item in center["examCollectionForDay"]:
-            if not isinstance(item, dict) or "examType" not in item:
+            if not isinstance(item, dict):
+                raise ValueError("schedule_item")
+            organization_id = item.get("organizationId")
+            if organization_id is not None:
+                if isinstance(organization_id, bool):
+                    raise ValueError("schedule_organization_id")
+                try:
+                    organization_id = int(organization_id)
+                except (TypeError, ValueError, OverflowError):
+                    raise ValueError("schedule_organization_id") from None
+                if organization_id != PORD_GDANSK_ID:
+                    continue
+            if "examType" not in item:
                 raise ValueError("schedule_item")
             if item["examType"] != "Practice":
                 continue

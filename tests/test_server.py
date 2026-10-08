@@ -61,11 +61,32 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_save_multiple_ranges_restart_and_validation(self):
         await self.login()
+        centers=await self.client.get('/api/centers')
+        self.assertEqual([c['id'] for c in centers.json()],[43])
         config=(await self.client.get('/api/status')).json()['monitor']['config']
+        status=(await self.client.get('/api/status')).json()
+        self.assertEqual(config['interval_seconds'],1200)
+        self.assertEqual(status['monitor']['request_policy']['jwt_refresh_min_interval_seconds'],480)
+        self.assertIn('logowaniu',status['monitor']['request_policy']['profile_check'])
         config['ranges'].append({**config['ranges'][0],'time_from':'18:00','time_to':'20:00'})
         result=await self.client.put('/api/config',headers=self.headers,json=config)
         self.assertEqual(result.status_code,200,result.text)
         self.assertEqual(len(self.app.state.store.settings()[0].ranges),2)
+        config['center_id']=42
+        result=await self.client.put('/api/config',headers=self.headers,json=config)
+        self.assertEqual(result.status_code,422)
+        self.assertIn('PORD Gdańsk',result.json()['detail'])
+        self.assertEqual(self.app.state.store.settings()[0].center_id,43)
+        for interval in [900,1200,1800,3600]:
+            config['center_id']=43
+            config['interval_seconds']=interval
+            result=await self.client.put('/api/config',headers=self.headers,json=config)
+            self.assertEqual(result.status_code,200,result.text)
+            self.assertEqual(result.json()['interval_seconds'],interval)
+        for interval in [899,360,600]:
+            config['interval_seconds']=interval
+            result=await self.client.put('/api/config',headers=self.headers,json=config)
+            self.assertEqual(result.status_code,422)
         config['ranges'][1]['time_to']='06:00'
         self.assertEqual((await self.client.put('/api/config',headers=self.headers,json=config)).status_code,422)
         self.assertEqual((await self.client.get('/api/status',headers={'Host':'evil.example'})).status_code,400)

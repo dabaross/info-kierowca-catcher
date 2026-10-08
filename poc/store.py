@@ -32,6 +32,8 @@ class Store:
           CREATE TABLE IF NOT EXISTS subscriptions(owner TEXT, id TEXT, encrypted TEXT, PRIMARY KEY(owner,id));
           CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY, owner TEXT, sub_id TEXT, payload TEXT, due REAL, expires REAL, tries INTEGER DEFAULT 0);
           CREATE TABLE IF NOT EXISTS limits(owner TEXT, endpoint TEXT, until REAL, PRIMARY KEY(owner,endpoint));
+          CREATE TABLE IF NOT EXISTS monitor_blocks(owner TEXT PRIMARY KEY, status INTEGER NOT NULL, diagnostic TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS schedule_timing(owner TEXT PRIMARY KEY, last_success REAL, next_check REAL NOT NULL);
           CREATE TABLE IF NOT EXISTS panel_sessions(token TEXT PRIMARY KEY, owner TEXT, expires REAL, password_version TEXT);
         """)
         self.db.execute("INSERT OR IGNORE INTO settings VALUES (?,?,0)", (owner, MonitorConfig().model_dump_json()))
@@ -39,7 +41,13 @@ class Store:
 
     def settings(self):
         row = self.db.execute("SELECT config,enabled FROM settings WHERE owner=?", (self.owner,)).fetchone()
-        return MonitorConfig.model_validate_json(row["config"]), bool(row["enabled"])
+        config_data = json.loads(row["config"])
+        if config_data.get("interval_seconds") in {360, 600}:
+            config_data["interval_seconds"] = 1200
+            with self.db:
+                self.db.execute("UPDATE settings SET config=? WHERE owner=?",
+                                (json.dumps(config_data), self.owner))
+        return MonitorConfig.model_validate(config_data), bool(row["enabled"])
 
     def save_settings(self, config, enabled):
         with self.db:
@@ -62,6 +70,35 @@ class Store:
     def defer(self, path, until):
         with self.db:
             self.db.execute("INSERT INTO limits VALUES (?,?,?) ON CONFLICT(owner,endpoint) DO UPDATE SET until=max(until,excluded.until)", (self.owner, path, until))
+
+    def schedule_block(self):
+        row = self.db.execute("SELECT status,diagnostic FROM monitor_blocks WHERE owner=?", (self.owner,)).fetchone()
+        return dict(row) if row else None
+
+    def block_schedule(self, status, diagnostic):
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO monitor_blocks VALUES (?,?,?)",
+                            (self.owner, status, diagnostic or ""))
+
+    def clear_schedule_block(self):
+        with self.db:
+            self.db.execute("DELETE FROM monitor_blocks WHERE owner=?", (self.owner,))
+
+    def schedule_timing(self):
+        row = self.db.execute(
+            "SELECT last_success,next_check FROM schedule_timing WHERE owner=?",
+            (self.owner,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def save_schedule_timing(self, last_success, next_check):
+        with self.db:
+            self.db.execute(
+                "INSERT INTO schedule_timing VALUES (?,?,?) "
+                "ON CONFLICT(owner) DO UPDATE SET "
+                "last_success=excluded.last_success,next_check=excluded.next_check",
+                (self.owner, last_success, next_check),
+            )
 
     def subscribe(self, id, subscription):
         encrypted = self.fernet.encrypt(json.dumps(subscription).encode()).decode()

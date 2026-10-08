@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from .browser import LoginController
-from .models import CENTERS, MonitorConfig
+from .models import CENTERS, MonitorConfig, PORD_GDANSK_ID
 from .monitor import Monitor
 from .notify import Push, subscription_id, validate_subscription
 from .session import Sessions
@@ -142,7 +142,7 @@ def create_app(controller=None):
 
     @app.get('/api/centers', dependencies=[Depends(auth)])
     async def centers():
-        return CENTERS
+        return [center for center in CENTERS if center['id'] == PORD_GDANSK_ID]
 
     @app.post('/api/login/start', dependencies=[Depends(auth)])
     async def start_login():
@@ -166,6 +166,8 @@ def create_app(controller=None):
             config = MonitorConfig.model_validate(await body(request))
         except ValidationError as exc:
             raise HTTPException(422, '; '.join(e['msg'] for e in exc.errors(include_input=False))[:600]) from None
+        if config.center_id != PORD_GDANSK_ID:
+            raise HTTPException(422, 'Ta wersja monitoruje wyłącznie PORD Gdańsk (ID 43). Wybierz Gdańsk i zapisz konfigurację.')
         if sessions.client and config.profile_id not in sessions.profiles:
             raise HTTPException(422, 'Wybierz aktualny profil PKK.')
         monitor.save(config)

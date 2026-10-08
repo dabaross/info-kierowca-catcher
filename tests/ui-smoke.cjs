@@ -6,7 +6,7 @@ const dom=new JSDOM(fs.readFileSync(path.join(root,'index.html'),'utf8'),{url:'h
 const w=dom.window;let signed=false, offline=false, saved;
 const range={date_from:'2026-10-12',date_to:'2026-10-16',time_from:'07:00',time_to:'09:00',weekdays:[0,1,2,3,4]};
 const state={session:{active:true,generation:1,connected_at:Date.now()/1000,message:'Sesja potwierdzona.',profiles:[{id:'profile',label:'Kategoria B · PKK …1234'}]},login:null,
-  monitor:{config:{center_id:43,profile_id:'profile',ranges:[range],interval_seconds:360},enabled:false,state:'PAUSED',slots:[],windows:[],windows_total:1,next_check:0,message:'Wstrzymany'},events:[],push:{public_key:'abc',devices:0}};
+  monitor:{config:{center_id:43,profile_id:'profile',ranges:[range],interval_seconds:1200},enabled:false,state:'PAUSED',slots:[],windows:[],windows_total:1,next_check:0,message:'Wstrzymany',last_check:null,http_status:null},events:[],push:{public_key:'abc',devices:0}};
 w.fetch=async(url,opts)=>{
  if(offline)throw new Error('offline');
  let status=200,data={ok:true};
@@ -26,6 +26,8 @@ async function main(){
  w.document.getElementById('password').value='testpassword';
  w.document.getElementById('authForm').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await pause();
  assert.equal(w.document.getElementById('dashboard').hidden,false);
+ assert.deepEqual([...w.document.getElementById('interval').options].map(o=>Number(o.value)),[900,1200,1800,3600]);
+ assert.equal(w.document.getElementById('interval').value,'1200');
  assert.equal(w.document.querySelectorAll('.range').length,1);
  w.document.getElementById('addRange').click();await pause();
  const ranges=w.document.querySelectorAll('.range');assert.equal(ranges.length,2);
@@ -36,8 +38,13 @@ async function main(){
  ranges[1].querySelector('.range-head button').click();await pause();assert.equal(w.document.querySelectorAll('.range').length,1);
  assert.equal(w.document.getElementById('dirty').hidden,false);
  await w.testRefresh();assert.equal(w.document.querySelectorAll('.range').length,1); // polling must preserve edits
+ state.monitor.state='HTTP_400';state.monitor.http_status=400;state.monitor.message='HTTP 400. Próby wstrzymane.';
+ await w.testRefresh();
+ assert.match(w.document.getElementById('monitorStatus').textContent,/HTTP 400/);
+ assert.match(w.document.getElementById('nextCheck').textContent,/wstrzymane/i);
+ assert.match(w.document.getElementById('slots').textContent,/HTTP 400/);
  offline=true;await w.testRefresh();assert.equal(w.document.getElementById('connection').hidden,false);
- console.log('UI DOM: login, multiple ranges, save, start, removal, unsaved edits and offline state: PASS');
+ console.log('UI DOM: login, interval choices/default, multiple ranges, save, start, removal, unsaved edits and offline state: PASS');
  dom.window.close();
 }
 main().catch(e=>{console.error(e);dom.window.close();process.exitCode=1;});
