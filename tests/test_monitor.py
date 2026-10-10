@@ -8,9 +8,15 @@ from pathlib import Path
 from unittest.mock import patch
 import httpx
 from pydantic import ValidationError
-from poc.models import CATEGORIES, MonitorConfig, parse_schedule, WARSAW, now_local
+from poc.models import (
+    CATEGORIES, MonitorConfig, parse_one_center_schedule,
+    WARSAW, now_local,
+)
 from poc.store import Store
-from poc.session import Sessions, PortalError, SCHEDULE_PATH, ALLOWED, build_schedule_payload
+from poc.session import (
+    Sessions, PortalError, SCHEDULE_PATH, LEGACY_SCHEDULE_PATH, ALLOWED,
+    build_schedule_payload,
+)
 from poc.monitor import Monitor
 from poc.notify import Push
 
@@ -31,11 +37,23 @@ def exam(at, **changes):
 
 
 def schedule(at):
-    return [{'wordId':43,'wordName':'PORD Gdańsk','examCollectionForDay':[exam(at)]}]
+    return schedule_many([exam(at)])
 
 
 def schedule_many(exams):
-    return [{'wordId':43,'wordName':'PORD Gdańsk','examCollectionForDay':exams}]
+    by_date = {}
+    for item in exams:
+        at = item.get('practiceDateTime') or item.get('theoryDateTime')
+        if at:
+            day = datetime.fromisoformat(at).date().isoformat()
+            by_date.setdefault(day, []).append(item)
+    return {
+        'startDatePointerForCalendar': '2026-10-12',
+        'examCollectionForDay': [
+            {'date': day, 'examCollections': items}
+            for day, items in sorted(by_date.items())
+        ],
+    }
 
 
 class Filters(unittest.TestCase):
@@ -57,75 +75,283 @@ class Filters(unittest.TestCase):
             self.assertFalse(c.matches(slot(at),now),at)
         self.assertFalse(c.matches({**slot('2026-10-12T08:00:00+02:00'),'center_id':1},now))
 
-    def test_windows_union_and_validation(self):
-        c=config();self.assertEqual(c.windows(date(2026,10,10)),[(date(2026,10,12),date(2026,10,16))])
-        self.assertEqual(c.windows(date(2026,10,17)),[])
+    def test_start_date_uses_earliest_interesting_future_date(self):
+        c=config()
+        self.assertEqual(c.start_date(date(2026,10,10)),date(2026,10,12))
+        self.assertIsNone(c.start_date(date(2026,10,17)))
+        long_range = MonitorConfig(ranges=[dict(
+            date_from='2026-10-12', date_to='2026-11-30',
+            weekdays=list(range(7)),
+        )])
+        self.assertEqual(
+            long_range.start_date(date(2026,10,10)),
+            date(2026,10,12),
+        )
         data=c.model_dump(mode='json');data['ranges']=[]
         with self.assertRaises(ValidationError):MonitorConfig(**data)
         data=c.model_dump(mode='json');data['ranges'][1]['date_to']='2027-01-01'
         with self.assertRaises(ValidationError):MonitorConfig(**data)
 
-    def test_multiple_centers_practice_filters_deduplicates_and_dst(self):
-        raw = [
-            {'wordId':43,'wordName':'PORD Gdańsk','examCollectionForDay':[
-                exam('2026-10-25T08:00:00Z'),
-                exam('2026-10-25T08:30:00Z',examType='Theory',practiceId='theory'),
-                exam('2026-10-25T09:00:00Z',practiceId=None),
-                exam('2026-10-25T09:30:00Z',placePracticeAmount=0,practiceId='full'),
-                exam('2026-10-25T10:00:00Z',category='A',practiceId='other-category'),
-                exam('2026-10-25T08:00:00Z'),
-            ]},
-            {'wordId':44,'wordName':'Other center','examCollectionForDay':[
-                exam('2026-10-25T11:00:00Z',practiceId='other-center',organizationId=44)
-            ]},
-        ]
-        slots = parse_schedule(raw, 'b')
-        self.assertEqual(len(slots), 1)
-        self.assertEqual(slots[0], {
-            'key':'43:one','center_id':43,'center_name':'PORD Gdańsk',
-            'start':'2026-10-25T09:00:00+01:00','places':1,
-            'category':'B','practice_id':'one',
-        })
-        for malformed in [{}, {'examCollectionForDay':[]}, [None],
-                          [{'wordId':43,'wordName':'PORD','examCollectionForDay':None}]]:
-            with self.assertRaises(ValueError):
-                parse_schedule(malformed, 'B')
-
-    def test_only_gdansk_word_and_organization_are_parsed(self):
-        other_centers = [
-            {'wordId': center_id, 'wordName': name,
-             'examCollectionForDay': [exam('2026-10-25T08:00:00Z',
-                                           practiceId=str(center_id),
-                                           organizationId=center_id)]}
-            for center_id, name in [(42, 'Gdynia'), (53, 'Elbląg'),
-                                    (73, 'Chojnice'), (9, 'Grudziądz')]
-        ]
-        raw = [{'wordId':43,'wordName':'PORD Gdańsk','examCollectionForDay':[
-            exam('2026-10-25T08:00:00Z'),
-            exam('2026-10-25T08:30:00Z', practiceId='wrong-organization',
-                 organizationId=42),
-        ]}, *other_centers]
-        slots = parse_schedule(raw, 'B')
-        self.assertEqual(len(slots), 1)
+    def test_one_center_calendar_parses_every_day_and_every_exam_collection(self):
+        practical_by_day = {day: [] for day in range(10, 31)}
+        for index in range(194):
+            day = 10 + index % 21
+            hour = 8 + index // 21
+            practical_by_day[day].append({
+                'practiceId': f'practice-{index}',
+                'practiceDateTime': f'2026-11-{day:02d}T{hour:02d}:{index % 60:02d}:00+01:00',
+                'placePracticeAmount': 1 + index % 4,
+                'examType': 'Practice',
+                'category': 'B',
+                'organizationId': 43,
+                'firstAvailable': False,
+            })
+        for index in range(126):
+            day = 10 + index % 21
+            practical_by_day[day].append({
+                'practiceId': None, 'practiceDateTime': None,
+                'placePracticeAmount': 0, 'theoryId': f'theory-{index}',
+                'examType': 'Theoretical', 'category': 'B', 'organizationId': 43,
+            })
+        response = {
+            'startDatePointerForCalendar': 'calendar-pointer',
+            'examCollectionForDay': [{
+                    'date': '2026-10-18',
+                    'examCollections': [{
+                        'theoryId': 'theory-only',
+                        'theoryDateTime': '2026-10-18T08:00:00+02:00',
+                        'placeTheoryAmount': 2,
+                        'examType': 'Theoretical',
+                        'category': 'B',
+                        'organizationId': 43,
+                    }],
+                },
+            ] + [{
+                    'date': f'2026-11-{day:02d}',
+                    'examCollections': collections,
+                }
+                for day, collections in practical_by_day.items()
+            ],
+        }
+        slots = parse_one_center_schedule(response, 'B')
+        self.assertEqual(len(slots), 194)
+        self.assertEqual(len({slot['key'] for slot in slots}), 194)
+        self.assertEqual(slots[0]['center_name'], 'PORD Gdańsk')
         self.assertEqual(slots[0]['center_id'], 43)
-        self.assertEqual(slots[0]['practice_id'], 'one')
+        self.assertEqual({slot['places'] for slot in slots}, {1, 2, 3, 4})
+        self.assertTrue(all(slot['category'] == 'B' for slot in slots))
+        config = MonitorConfig(
+            center_id=43,
+            ranges=[dict(
+                date_from='2026-10-07', date_to='2026-11-30',
+                time_from='05:30', time_to='23:00',
+                weekdays=list(range(7)),
+            )],
+        )
+        now = datetime(2026, 10, 10, 12, 0, tzinfo=WARSAW)
+        self.assertEqual(
+            len([slot for slot in slots if config.matches(slot, now)]), 194
+        )
+        duplicate = dict(response['examCollectionForDay'][1]['examCollections'][0])
+        response['examCollectionForDay'][1]['examCollections'].append(duplicate)
+        self.assertEqual(len(parse_one_center_schedule(response, 'B')), 194)
+        self.assertEqual(parse_one_center_schedule(response, 'A'), [])
+
+    def test_one_center_calendar_requires_confirmed_center_and_valid_practice(self):
+        response = {
+            'startDatePointerForCalendar': 'p',
+            'examCollectionForDay': [{
+                'date': '2026-11-10',
+                'examCollections': [
+                    exam('2026-11-10T08:00:00+01:00'),
+                    exam('2026-11-10T08:30:00+01:00', practiceId=None),
+                    exam('2026-11-10T09:00:00+01:00', placePracticeAmount=0,
+                         practiceId='full'),
+                    exam('2026-11-10T09:30:00+01:00', category='A',
+                         practiceId='other-category'),
+                    exam('2026-11-10T10:00:00+01:00', organizationId=42,
+                         practiceId='other-center'),
+                ],
+            }],
+        }
+        slots = parse_one_center_schedule(response, 'B')
+        self.assertEqual([slot['practice_id'] for slot in slots], ['one'])
+        response['examCollectionForDay'][0]['examCollections'].append(
+            exam('2026-11-10T10:30:00+01:00', organizationId=42,
+                 practiceId='other-center')
+        )
+        self.assertEqual(
+            [slot['practice_id'] for slot in parse_one_center_schedule(response, 'B')],
+            ['one'],
+        )
+        for malformed in [
+            {},
+            {'startDatePointerForCalendar': 'p', 'examCollectionForDay': None},
+            {'startDatePointerForCalendar': 'p', 'examCollectionForDay': [
+                {'date': 'not-a-date', 'examCollections': []},
+            ]},
+        ]:
+            with self.subTest(malformed=malformed), self.assertRaises(ValueError):
+                parse_one_center_schedule(malformed, 'B')
+        mismatch = {
+            'startDatePointerForCalendar': 'p',
+            'examCollectionForDay': [{
+                'date': '2026-11-10',
+                'examCollections': [exam('2026-11-11T08:00:00+01:00')],
+            }],
+        }
+        with self.assertRaisesRegex(ValueError, 'one_center_day_mismatch'):
+            parse_one_center_schedule(mismatch, 'B')
+
+    def test_one_center_slots_use_future_date_time_and_weekday_filters(self):
+        response = {
+            'startDatePointerForCalendar': 'p',
+            'examCollectionForDay': [
+                {'date': '2026-11-10', 'examCollections': [
+                    exam('2026-11-10T08:00:00+01:00', practiceId='past'),
+                ]},
+                {'date': '2026-11-16', 'examCollections': [
+                    exam('2026-11-16T08:00:00+01:00', practiceId='matching'),
+                ]},
+                {'date': '2026-11-14', 'examCollections': [
+                    exam('2026-11-14T08:00:00+01:00', practiceId='weekend'),
+                ]},
+                {'date': '2026-11-17', 'examCollections': [
+                    exam('2026-11-17T18:00:00+01:00', practiceId='late'),
+                ]},
+            ],
+        }
+        slots = parse_one_center_schedule(response, 'B')
+        config = MonitorConfig(
+            center_id=43,
+            ranges=[dict(
+                date_from='2026-11-10', date_to='2026-11-20',
+                time_from='07:00', time_to='09:00',
+                weekdays=[0, 1, 2, 3, 4],
+            )],
+        )
+        now = datetime(2026, 11, 10, 8, 30, tzinfo=WARSAW)
+        matches = [slot for slot in slots if config.matches(slot, now)]
+        self.assertEqual([slot['practice_id'] for slot in matches], ['matching'])
+
+    def test_filter_change_can_match_and_notify_previously_nonmatching_exam(self):
+        tomorrow = now_local().date() + timedelta(days=1)
+        exam_slot = {
+            'key': '43:existing', 'center_id': 43, 'center_name': 'PORD Gdańsk',
+            'start': tomorrow.isoformat() + 'T10:00:00+02:00',
+            'places': 1, 'category': 'B', 'practice_id': 'existing',
+        }
+        early_filter = MonitorConfig(
+            center_id=43,
+            ranges=[dict(date_from=tomorrow, date_to=tomorrow,
+                         time_from='07:00', time_to='09:00', weekdays=list(range(7)))],
+        )
+        later_filter = MonitorConfig(
+            center_id=43,
+            ranges=[dict(date_from=tomorrow, date_to=tomorrow,
+                         time_from='09:00', time_to='11:00', weekdays=list(range(7)))],
+        )
+        now = datetime.combine(tomorrow, datetime.min.time(), WARSAW)
+        self.assertFalse(early_filter.matches(exam_slot, now))
+        matches = [slot for slot in [exam_slot] if later_filter.matches(slot, now)]
+        self.assertEqual([slot['practice_id'] for slot in matches], ['existing'])
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory))
+            payload = lambda new: {'title': 'new', 'body': str(len(new))}
+            earlier_matches = [
+                slot for slot in [exam_slot] if early_filter.matches(slot, now)
+            ]
+            self.assertEqual(store.record_matches('profile', earlier_matches, payload), [])
+            later_matches = [
+                slot for slot in [exam_slot] if later_filter.matches(slot, now)
+            ]
+            self.assertEqual(
+                [slot['practice_id'] for slot in store.record_matches(
+                    'profile', later_matches, payload
+                )],
+                ['existing'],
+            )
+            store.close()
 
     def test_schedule_payload_is_isolated_and_schedule_path_allowed(self):
-        self.assertEqual(SCHEDULE_PATH, '/bknd/exam/api/v1/Schedules/user/MultipleCentersExams')
+        self.assertEqual(
+            SCHEDULE_PATH,
+            '/bknd/exam/api/v1/Schedules/user/OneCenterExam',
+        )
         self.assertIn(('POST', SCHEDULE_PATH), ALLOWED)
         payload=build_schedule_payload(
             {'number':'123456789','category':'B'}, date(2026, 11, 3)
         )
         self.assertEqual(payload, {
-            'startDate':'2026-11-03','organizationId':[43,42,53,73,9],
+            'startDate':'2026-11-03','organizationId':[43],
             'category':5,'profileNumber':'123456789','profileType':'Pkk',
         })
         self.assertEqual(CATEGORIES.index('B'),5)
 
+    def test_dst_winter_time_is_converted_to_warsaw(self):
+        response = {
+            'startDatePointerForCalendar': '2026-10-12',
+            'examCollectionForDay': [{
+                'date': '2026-10-25',
+                'examCollections': [
+                    exam('2026-10-25T03:15:00'),
+                    exam('2026-10-25T01:15:00Z', practiceId='utc'),
+                ],
+            }],
+        }
+        slots = parse_one_center_schedule(response, 'B')
+        self.assertEqual(slots[0]['start'], '2026-10-25T02:15:00+01:00')
+        self.assertEqual(slots[1]['start'], '2026-10-25T03:15:00+01:00')
+
     def test_parsed_slot_outside_preferred_range_is_rejected(self):
         c = config()
-        parsed = parse_schedule(schedule('2026-10-12T12:00:00+02:00'), 'B')[0]
+        parsed = {
+            **slot('2026-10-12T12:00:00+02:00'),
+            'category': 'B',
+            'practice_id': 'outside-range',
+        }
         self.assertFalse(c.matches(parsed, datetime(2026,10,10,tzinfo=WARSAW)))
+
+    def test_legacy_window_snapshots_migrate_to_latest_calendar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory))
+            store.db.execute("""
+                CREATE TABLE schedule_snapshots(
+                    owner TEXT, profile TEXT, window_start TEXT,
+                    payload TEXT NOT NULL, at REAL NOT NULL,
+                    PRIMARY KEY(owner,profile,window_start)
+                )
+            """)
+            legacy_payloads = [
+                {
+                    'from': day, 'to': day, 'requested_start': day,
+                    'calendar_dates': [day], 'slots': [slot(
+                        '2026-11-10T08:00:00+01:00', key
+                    )],
+                }
+                for day, key in [('2026-10-12', 'old'), ('2026-10-20', 'latest')]
+            ]
+            for index, payload in enumerate(legacy_payloads, start=1):
+                store.db.execute(
+                    'INSERT INTO schedule_snapshots VALUES (?,?,?,?,?)',
+                    ('owner', 'profile:one-center', payload['requested_start'],
+                     json.dumps(payload), index),
+                )
+            store.db.commit()
+            store.close()
+
+            migrated = Store(Path(directory))
+            self.assertEqual(
+                [saved['key'] for saved in migrated.schedule_calendar(
+                    'profile:one-center'
+                )['slots']],
+                ['latest'],
+            )
+            self.assertIsNone(migrated.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='schedule_snapshots'"
+            ).fetchone())
+            migrated.close()
 
 
 class Integration(unittest.IsolatedAsyncioTestCase):
@@ -241,6 +467,19 @@ class Integration(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(self.store.cooldown(SCHEDULE_PATH),reset)
         other=Store(self.path);self.assertGreaterEqual(other.cooldown(SCHEDULE_PATH),reset);other.close()
 
+    async def test_schedule_respects_persisted_legacy_endpoint_cooldown(self):
+        calls=[]
+        profile=await self.install(
+            lambda request: (calls.append(request) or httpx.Response(200, json=schedule_many([])))
+        )
+        until=time.time()+900
+        self.store.defer(LEGACY_SCHEDULE_PATH, until)
+        with self.assertRaises(PortalError) as error:
+            await self.sessions.schedule(profile,43,date.today())
+        self.assertEqual(error.exception.code,'RATE_LIMITED')
+        self.assertEqual(error.exception.until,until)
+        self.assertEqual(calls,[])
+
     async def test_jwt_refresh_cadence_and_profile_probe_on_refresh_failure(self):
         from poc.session import PROFILE_PATH, REFRESH_INTERVAL_SECONDS, REFRESH_PATH
         requests=[]
@@ -289,7 +528,7 @@ class Integration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(requests),1)
         self.assertEqual(requests[0].method,'POST')
         self.assertEqual(requests[0].url.path,SCHEDULE_PATH)
-        self.assertEqual(requests[0].read(),b'{"startDate":"2026-11-03","organizationId":[43,42,53,73,9],"category":5,"profileNumber":"123456789","profileType":"Pkk"}')
+        self.assertEqual(requests[0].read(),b'{"startDate":"2026-11-03","organizationId":[43],"category":5,"profileNumber":"123456789","profileType":"Pkk"}')
 
     async def test_invalid_schedule_schema_is_reported_without_expiring_session(self):
         profile=await self.install(lambda request:httpx.Response(200,json={'unexpected':'shape'}))
@@ -304,6 +543,23 @@ class Integration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor.state,'SCHEMA')
         self.assertIsNotNone(self.sessions.client)
         self.assertEqual(monitor.public()['slots'],[])
+
+    async def test_monitor_does_not_query_for_non_b_profile(self):
+        calls=[]
+        profile=await self.install(
+            lambda request: (calls.append(request) or httpx.Response(200,json=[]))
+        )
+        self.sessions.profiles[profile]['category']='A'
+        tomorrow=now_local().date()+timedelta(days=1)
+        monitor=Monitor(self.store,self.sessions,self.push)
+        monitor.save(MonitorConfig(
+            center_id=43,profile_id=profile,
+            ranges=[dict(date_from=tomorrow,date_to=tomorrow,weekdays=list(range(7)))],
+        ))
+        monitor.toggle(True)
+        await monitor.tick()
+        self.assertEqual(monitor.state,'NEEDS_PROFILE')
+        self.assertEqual(calls,[])
 
     async def test_profiles_are_category_filtered_and_private_fields_are_not_public(self):
         client=httpx.AsyncClient(transport=httpx.MockTransport(
@@ -334,19 +590,14 @@ class Integration(unittest.IsolatedAsyncioTestCase):
     async def test_monitor_dedup_and_push_queue(self):
         tomorrow=now_local().date()+timedelta(days=1)
         calls=[]
-        raw=[
-            {'wordId':43,'wordName':'PORD Gdańsk','examCollectionForDay':[
-                exam(tomorrow.isoformat()+'T08:00:00'),
-                exam(tomorrow.isoformat()+'T08:30:00'),
-                exam(tomorrow.isoformat()+'T16:30:00',practiceId='two'),
-                exam(tomorrow.isoformat()+'T12:00:00',practiceId='outside'),
-            ]},
-            *[{'wordId':center_id,'wordName':name,'examCollectionForDay':[
-                exam(tomorrow.isoformat()+'T08:00:00',practiceId=str(center_id),
-                     organizationId=center_id),
-            ]} for center_id,name in [(42,'PORD Gdynia'),(53,'WORD Elbląg'),
-                                      (73,'PORD Chojnice'),(9,'WORD Grudziądz')]]
-        ]
+        raw=schedule_many([
+            exam(tomorrow.isoformat()+'T08:00:00'),
+            exam(tomorrow.isoformat()+'T08:30:00'),
+            exam(tomorrow.isoformat()+'T16:30:00',practiceId='two'),
+            exam(tomorrow.isoformat()+'T12:00:00',practiceId='outside'),
+            *[exam(tomorrow.isoformat()+'T08:00:00',practiceId=str(center_id),
+                   organizationId=center_id) for center_id in [42,53,73,9]],
+        ])
         def handler(request):
             if request.method=='POST':
                 calls.append(request)
@@ -367,9 +618,15 @@ class Integration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.next_check,first_next)
         await restored.tick()
         self.assertEqual(len(calls),1)
-        self.assertEqual(restored.public()['slots'],[])
+        self.assertEqual(
+            {slot['practice_id'] for slot in restored.public()['slots']},
+            {'one', 'two'},
+        )
         message=json.loads(self.store.db.execute('SELECT payload FROM outbox').fetchone()[0])
         self.assertIn('PORD Gdańsk',message['body'])
+        self.assertIn('2 nowych terminów',message['body'])
+        self.assertIn('08:30',message['body'])
+        self.assertIn('16:30',message['body'])
         for name in ['PORD Gdynia','WORD Elbląg','PORD Chojnice','WORD Grudziądz']:
             self.assertNotIn(name,message['body'])
         monitor.next_check=0;self.store.db.execute('DELETE FROM limits');self.store.db.commit();await monitor.tick()
@@ -380,6 +637,255 @@ class Integration(unittest.IsolatedAsyncioTestCase):
         self.store.db.execute('UPDATE outbox SET due=0');self.store.db.commit()
         with patch.object(self.push,'_deliver',return_value=410):await self.push.flush()
         self.assertEqual(self.store.subscriptions(),[])
+
+    async def test_filter_change_relogin_and_restart_keep_slots_without_duplicate_alerts(self):
+        tomorrow = now_local().date() + timedelta(days=1)
+        raw = schedule_many([
+            exam(tomorrow.isoformat() + 'T08:00:00+02:00', practiceId='morning'),
+            exam(tomorrow.isoformat() + 'T12:00:00+02:00', practiceId='noon'),
+        ])
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            return httpx.Response(200, json=raw)
+
+        profile = await self.install(handler)
+        monitor = Monitor(self.store, self.sessions, self.push)
+        morning = dict(
+            date_from=tomorrow, date_to=tomorrow, time_from='07:00',
+            time_to='09:00', weekdays=list(range(7)),
+        )
+        noon = dict(
+            date_from=tomorrow, date_to=tomorrow, time_from='11:00',
+            time_to='13:00', weekdays=list(range(7)),
+        )
+        monitor.save(MonitorConfig(center_id=43, profile_id=profile, ranges=[morning]))
+        self.store.subscribe('test', {'endpoint': 'https://fcm.googleapis.com/test'})
+        monitor.toggle(True)
+        await monitor.tick()
+        self.assertEqual(
+            [slot['practice_id'] for slot in monitor.public()['slots']],
+            ['morning'],
+        )
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 1)
+
+        monitor.save(MonitorConfig(center_id=43, profile_id=profile, ranges=[noon]))
+        self.assertEqual(
+            [slot['practice_id'] for slot in monitor.public()['slots']],
+            ['noon'],
+        )
+        monitor.next_check = 0
+        self.store.db.execute('DELETE FROM limits')
+        self.store.db.commit()
+        await monitor.tick()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 2)
+
+        restored_store = Store(self.path)
+        try:
+            restored = Monitor(restored_store, self.sessions, self.push)
+            self.assertEqual(
+                [slot['practice_id'] for slot in restored.public()['slots']],
+                ['noon'],
+            )
+            self.assertEqual(
+                restored_store.record_matches(
+                    profile, [parse_one_center_schedule(raw, 'B')[1]],
+                    lambda new: {'title': 'duplicate', 'body': str(len(new))},
+                ),
+                [],
+            )
+            await self.install(handler)
+            await restored.tick()
+            self.assertEqual(
+                [slot['practice_id'] for slot in restored.public()['slots']],
+                ['noon'],
+            )
+            self.assertEqual(
+                restored_store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0],
+                2,
+            )
+        finally:
+            restored_store.close()
+
+    async def test_one_center_monitor_keeps_results_beyond_old_twenty_day_window(self):
+        tomorrow = now_local().date() + timedelta(days=1)
+        last_day = tomorrow + timedelta(days=40)
+        calendar = schedule_many([
+            exam(last_day.isoformat() + 'T08:00:00+01:00', practiceId='late'),
+        ])
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            return httpx.Response(200, json=calendar)
+
+        profile = await self.install(handler)
+        monitor = Monitor(self.store, self.sessions, self.push)
+        monitor.save(MonitorConfig(
+            center_id=43, profile_id=profile,
+            ranges=[dict(
+                date_from=tomorrow, date_to=last_day,
+                time_from='05:30', time_to='23:00',
+                weekdays=list(range(7)),
+            )],
+        ))
+        monitor.toggle(True)
+        await monitor.tick()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            [slot['practice_id'] for slot in monitor.public()['slots']],
+            ['late'],
+        )
+        public = monitor.public()
+        self.assertEqual(public['calendar']['requested_start'], tomorrow.isoformat())
+        self.assertEqual(public['calendar']['calendar_dates'], [last_day.isoformat()])
+        self.assertNotIn('windows', public)
+        self.assertNotIn('windows_total', public)
+        self.assertIn('Pełny zakres filtrów nie jest potwierdzony', monitor.message)
+        stored = self.store.schedule_calendar(f'{profile}:one-center')
+        self.assertEqual(
+            [slot['practice_id'] for slot in stored['slots']],
+            ['late'],
+        )
+
+    async def test_october_twelve_request_includes_november_ten_exam(self):
+        requested = []
+        response = {
+            'startDatePointerForCalendar': '2026-10-12',
+            'examCollectionForDay': [{
+                'date': '2026-11-10',
+                'examCollections': [
+                    exam('2026-11-10T08:30:00+01:00', practiceId='november-ten'),
+                ],
+            }],
+        }
+
+        def handler(request):
+            requested.append(request)
+            return httpx.Response(200, json=response)
+
+        profile = await self.install(handler)
+        monitor = Monitor(self.store, self.sessions, self.push)
+        monitor.save(MonitorConfig(
+            center_id=43, profile_id=profile,
+            ranges=[dict(
+                date_from='2026-10-12', date_to='2026-11-30',
+                time_from='05:30', time_to='23:00', weekdays=list(range(7)),
+            )],
+        ))
+        monitor.toggle(True)
+        with patch(
+            'poc.monitor.now_local',
+            return_value=datetime(2026, 10, 10, 22, 25, tzinfo=WARSAW),
+        ):
+            await monitor.tick()
+
+        self.assertEqual(len(requested), 1)
+        self.assertEqual(
+            json.loads(requested[0].read())['startDate'],
+            '2026-10-12',
+        )
+        self.assertEqual(
+            [slot['practice_id'] for slot in monitor.public()['slots']],
+            ['november-ten'],
+        )
+
+    async def test_successful_calendar_read_replaces_removed_portal_terms(self):
+        tomorrow = now_local().date() + timedelta(days=1)
+        responses = [
+            schedule(tomorrow.isoformat() + 'T08:00:00+02:00'),
+            schedule_many([]),
+        ]
+
+        def handler(request):
+            return httpx.Response(200, json=responses.pop(0))
+
+        profile = await self.install(handler)
+        monitor = Monitor(self.store, self.sessions, self.push)
+        monitor.save(MonitorConfig(
+            center_id=43, profile_id=profile,
+            ranges=[dict(
+                date_from=tomorrow, date_to=tomorrow,
+                time_from='05:30', time_to='23:00', weekdays=list(range(7)),
+            )],
+        ))
+        monitor.toggle(True)
+        await monitor.tick()
+        self.assertEqual(len(monitor.public()['slots']), 1)
+
+        self.store.db.execute(
+            'UPDATE limits SET until=0 WHERE owner=? AND endpoint=?',
+            ('owner', SCHEDULE_PATH),
+        )
+        self.store.db.commit()
+        monitor.next_check = 0
+        await monitor.tick()
+
+        self.assertEqual(monitor.public()['slots'], [])
+        self.assertEqual(monitor.public()['calendar']['slots'], [])
+        self.assertEqual(
+            self.store.schedule_calendar(f'{profile}:one-center')['slots'],
+            [],
+        )
+
+    async def test_one_center_request_payload_matches_confirmed_request_shape(self):
+        requests=[]
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(200, json=schedule_many([]))
+        profile=await self.install(handler)
+        await self.sessions.schedule(profile,43,date(2026,10,12))
+        self.assertEqual(len(requests),1)
+        self.assertEqual(requests[0].method,'POST')
+        self.assertEqual(
+            requests[0].url,
+            'https://info-kierowca.pl/bknd/exam/api/v1/Schedules/user/OneCenterExam',
+        )
+        self.assertEqual(requests[0].headers['content-type'],'application/json')
+        self.assertEqual(
+            json.loads(requests[0].read()),
+            {
+                'startDate':'2026-10-12','organizationId':[43],
+                'category':5,'profileNumber':'123456789','profileType':'Pkk',
+            },
+        )
+
+    async def test_saved_calendar_remains_visible_when_filters_change_and_after_restart(self):
+        tomorrow = now_local().date() + timedelta(days=1)
+        exam_at = f'{tomorrow.isoformat()}T10:00:00'
+        profile = await self.install(
+            lambda request: httpx.Response(200, json=schedule(exam_at))
+        )
+        monitor = Monitor(self.store, self.sessions, self.push)
+        monitor.save(MonitorConfig(
+            center_id=43, profile_id=profile,
+            ranges=[dict(
+                date_from=tomorrow, date_to=tomorrow,
+                time_from='07:00', time_to='09:00', weekdays=list(range(7)),
+            )],
+        ))
+        monitor.toggle(True)
+        await monitor.tick()
+        self.assertEqual(monitor.public()['slots'], [])
+
+        monitor.save(MonitorConfig(
+            center_id=43, profile_id=profile,
+            ranges=[dict(
+                date_from=tomorrow, date_to=tomorrow,
+                time_from='09:00', time_to='11:00', weekdays=list(range(7)),
+            )],
+        ))
+        self.assertEqual(
+            [slot['practice_id'] for slot in monitor.public()['slots']],
+            ['one'],
+        )
+        restored = Monitor(self.store, self.sessions, self.push)
+        self.assertEqual(
+            [slot['practice_id'] for slot in restored.public()['slots']],
+            ['one'],
+        )
 
     async def test_successful_empty_expired_429_and_network_states(self):
         tomorrow=now_local().date()+timedelta(days=1)
@@ -392,7 +898,9 @@ class Integration(unittest.IsolatedAsyncioTestCase):
             monitor.toggle(True)
             return monitor
 
-        profile=await self.install(lambda request:httpx.Response(200,json=[]))
+        profile=await self.install(
+            lambda request:httpx.Response(200,json=schedule_many([]))
+        )
         monitor=new_monitor(profile)
         await monitor.tick()
         self.assertEqual(monitor.state,'WATCHING')

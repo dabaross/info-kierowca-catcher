@@ -56,7 +56,6 @@ async function refresh(){
       if($('center').value!=='43'){$('center').value='';$('centerNotice').textContent='Zapisana konfiguracja wskazuje inny ośrodek. Ustaw PORD Gdańsk i zapisz, aby wznowić monitoring; dotychczasowe ustawienia i dane pozostają zachowane.';$('centerNotice').hidden=false;}
       else {$('centerNotice').hidden=true;}
       $('center').addEventListener('change',()=>{if(Number($('center').value)===43)$('centerNotice').hidden=true;});
-      $('center').addEventListener('change',()=>{if(Number($('center').value)===43)$('centerNotice').hidden=true;});
       $('interval').value=data.monitor.config.interval_seconds;
       $('ranges').replaceChildren();data.monitor.config.ranges.forEach(addRange);dirty=false;$('dirty').hidden=true;profileSignature='';loaded=true;
     }
@@ -87,9 +86,11 @@ async function refresh(){
     $('monitorMessage').textContent=m.message;
     $('monitorToggle').textContent=m.enabled?'Wstrzymaj monitoring':'Uruchom monitoring';
     const slots=m.slots.map(slot=>{const card=el('article',undefined,'slot'),left=el('div');left.append(el('strong',fmt(slot.start,{day:'numeric',month:'long',weekday:'short'})),el('small',`Miejsca: ${slot.places} · odczyt ${clock(slot.checked_at)}`));const t=el('time',clock(slot.start));t.dateTime=slot.start;card.append(left,t);return card;});
-    if(!slots.length){const empty=el('div',undefined,'empty'),emptyMessage=m.state==='HTTP_400'?'Odczyt nie powiódł się (HTTP 400); wyników nie zaktualizowano.':m.last_check?'Brak pasujących terminów w odczytanych oknach.':'Terminy pojawią się po pierwszym odczycie.';empty.append(el('span','⌁'),el('div',emptyMessage));slots.push(empty);}
+    if(!slots.length){const empty=el('div',undefined,'empty'),emptyMessage=m.state==='HTTP_400'?'Odczyt nie powiódł się (HTTP 400); wyników nie zaktualizowano.':m.last_check?'Brak pasujących terminów w ostatniej migawce kalendarza.':'Terminy pojawią się po pierwszym odczycie.';empty.append(el('span','⌁'),el('div',emptyMessage));slots.push(empty);}
     $('slots').replaceChildren(...slots);
-    $('coverage').textContent=`Odczytane okna: ${m.windows.length}/${m.windows_total}. `+m.windows.map(w=>`${w.from}–${w.to} (${clock(w.at)})`).join(' · ');
+    $('coverage').textContent=m.calendar
+      ?`Dni wymienione w ostatniej odpowiedzi kalendarza (zakres pełny niepotwierdzony): ${m.calendar.calendar_dates.join(', ')} · ${clock(m.calendar.at)}`
+      :'Brak dni kalendarza w ostatniej odpowiedzi.';
     $('events').replaceChildren(...data.events.slice(0,15).map(e=>{const li=el('li');li.append(el('time',fmt(e.at,{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})),el('span',e.message));return li;}));
     $('diagnostics').textContent=JSON.stringify({monitor:m.state,http:m.http_status,validation:m.diagnostic||null,last_successful_schedule_at:m.last_check,next_schedule_attempt_at:m.next_check||null,request_policy:m.request_policy,last_verified:s.last_verified,login:l?.diagnostics||{},push:p.last_result},null,2);
     pushKey=p.public_key;

@@ -3,7 +3,10 @@ import time
 from contextlib import suppress
 from datetime import datetime
 
-from .models import PORD_GDANSK_ID, now_local, parse_schedule
+from .models import (
+    PORD_GDANSK_ID, now_local, one_center_calendar_dates,
+    parse_one_center_schedule,
+)
 from .session import PortalError, REFRESH_INTERVAL_SECONDS, SCHEDULE_PATH
 
 FAILURE_BACKOFF_SECONDS = 360
@@ -11,7 +14,7 @@ MAX_FAILURE_BACKOFF_SECONDS = 3600
 
 MESSAGES = {
     "NEEDS_LOGIN": "Potwierdź logowanie w mObywatelu, aby wznowić monitoring.",
-    "NEEDS_PROFILE": "Wybierz profil PKK dostępny na aktualnie zalogowanym koncie.",
+    "NEEDS_PROFILE": "Wybierz profil PKK kategorii B dostępny na aktualnie zalogowanym koncie.",
     "NEEDS_CENTER": "Ta wersja monitoruje wyłącznie PORD Gdańsk. Wybierz Gdańsk i zapisz konfigurację.",
     "NETWORK": "Info-Kierowca nie odpowiada. Spróbujemy ponownie.",
     "RATE_LIMITED": "Limit zapytań Info-Kierowca. Czekamy przed kolejną próbą.",
@@ -42,8 +45,9 @@ class Monitor:
         elif self.enabled and self.config.center_id == PORD_GDANSK_ID and timing is None:
             self.next_check = time.time() + self.config.interval_seconds
             store.save_schedule_timing(None, self.next_check)
-        self.window_index = 0
-        self.snapshots = {}
+        self.calendar = self.store.schedule_calendar(
+            f"{self.config.profile_id}:one-center"
+        )
         self.task = None
         self.expiry_notified = False
         self.generation = sessions.generation
@@ -52,8 +56,9 @@ class Monitor:
     def save(self, config):
         self.config = config
         self.revision += 1
-        self.window_index = 0
-        self.snapshots = {}
+        self.calendar = self.store.schedule_calendar(
+            f"{config.profile_id}:one-center"
+        )
         block = self.store.schedule_block()
         self.store.clear_schedule_block()
         self.error_status = self.diagnostic = None
@@ -89,15 +94,19 @@ class Monitor:
         self.store.event("monitor", self.message)
 
     def public(self):
-        windows = self.config.windows(now_local().date())
-        slots = sorted((s for snap in self.snapshots.values() for s in snap["slots"] if self.config.matches(s, now_local())), key=lambda s:s["start"])
-        # Window starts don't overlap; keys protect against upstream duplicate entries.
-        unique = list({s["key"]: s for s in slots}.values())
+        now = now_local()
+        slots = sorted(
+            (
+                slot for slot in (self.calendar or {}).get("slots", [])
+                if self.config.matches(slot, now)
+            ),
+            key=lambda slot: slot["start"],
+        )
         return {"enabled": self.enabled, "state": self.state, "message": self.message,
                 "next_check": 0 if self.state == "HTTP_400" else max(self.next_check, self.store.cooldown(SCHEDULE_PATH)),
                 "last_check": self.last_check, "http_status": self.error_status,
                 "diagnostic": self.diagnostic,
-                "slots": unique, "windows_total": len(windows), "windows": list(self.snapshots.values()),
+                "slots": slots, "calendar": self.calendar,
                 "config": self.config.model_dump(mode="json"),
                 "request_policy": {
                     "schedule_interval_seconds": self.config.interval_seconds,
@@ -129,8 +138,6 @@ class Monitor:
         if self.generation != self.sessions.generation:
             self.generation = self.sessions.generation
             self.expiry_notified = False
-            self.snapshots = {}
-            self.window_index = 0
             self.store.event("session", "Nowa sesja gotowa. Zachowano ustawienia monitorowania.")
         if not self.enabled:
             return
@@ -149,11 +156,14 @@ class Monitor:
         if self.config.profile_id not in self.sessions.profiles:
             self.state, self.message = "NEEDS_PROFILE", MESSAGES["NEEDS_PROFILE"]
             return
+        if self.sessions.profiles[self.config.profile_id]["category"] != "B":
+            self.state, self.message = "NEEDS_PROFILE", MESSAGES["NEEDS_PROFILE"]
+            return
         if not self.sessions.warning_sent and time.time() - self.sessions.connected_at >= 50*60:
             self.sessions.warning_sent = True
             self.push.send_event("Sesja może niedługo wygasnąć", "Od logowania minęło 50 minut. Możesz potwierdzić nową sesję.", "session")
-        windows = self.config.windows(now_local().date())
-        if not windows:
+        start = self.config.start_date(now_local().date())
+        if start is None:
             self.toggle(False)
             self.state, self.message = "FINISHED", "Wybrany zakres dat już minął. Ustaw nowy zakres."
             return
@@ -163,7 +173,6 @@ class Monitor:
                 self.state, self.message = "WAITING", "Czekamy na zaplanowany odczyt."
             return
         config, revision = self.config, self.revision
-        start, end = windows[self.window_index % len(windows)]
         self.state, self.message = "CHECKING", "Sprawdzamy wolne terminy…"
         self.next_check = time.time() + config.interval_seconds
         self.store.save_schedule_timing(self.last_check, self.next_check)
@@ -171,31 +180,57 @@ class Monitor:
             raw = await self.sessions.schedule(config.profile_id, config.center_id, start)
             try:
                 category = self.sessions.profiles[config.profile_id]["category"]
-                slots = parse_schedule(raw, category)
+                slots = parse_one_center_schedule(raw, category)
+                calendar_dates = one_center_calendar_dates(raw)
             except (ValueError, TypeError, KeyError, OverflowError):
                 raise PortalError("SCHEMA") from None
             if revision != self.revision or not self.enabled:
                 return
-            matches = [s for s in slots if config.matches(s, now_local()) and start <= datetime.fromisoformat(s["start"]).date() <= end]
+            calendar_slots = slots
+            matches = [
+                s for s in calendar_slots
+                if config.matches(s, now_local())
+            ]
             at = time.time()
-            for s in matches:
+            for s in calendar_slots:
                 s["checked_at"] = at
-            # Discard expired window snapshots when calendar date shifts.
-            allowed_windows = {a.isoformat() for a,b in windows}
-            self.snapshots = {k:v for k,v in self.snapshots.items() if k in allowed_windows}
-            self.snapshots[start.isoformat()] = {"from": start.isoformat(), "to": end.isoformat(), "at": at, "slots": matches}
+            calendar = {
+                "requested_start": start.isoformat(),
+                "calendar_dates": [day.isoformat() for day in calendar_dates],
+                "at": at,
+                "slots": calendar_slots,
+            }
+            snapshot_key = f"{self.config.profile_id}:one-center"
+            self.store.save_schedule_calendar(
+                snapshot_key, start.isoformat(),
+                calendar["calendar_dates"], calendar_slots, at,
+            )
+            self.calendar = calendar
             self.last_check, self.error_status = at, None
             self.diagnostic = None
-            self.window_index = (self.window_index + 1) % len(windows)
             self.failures = 0
             self.state = "WATCHING"
-            self.message = f"Odczyt zakończony. Pasujące terminy w sprawdzonym oknie: {len(matches)}."
+            returned_days = len(calendar_dates)
+            self.message = (
+                f"Odczyt zakończony: {len(matches)} pasujących terminów; "
+                f"portal zwrócił {returned_days} dni kalendarza. "
+                "Pełny zakres filtrów nie jest potwierdzony."
+            )
             def payload(new):
-                first = new[0]
-                when = datetime.fromisoformat(first["start"]).strftime("%d.%m, %H:%M")
-                return self.push.payload("Jest pasujący termin", f"{first['center_name']} · {when}. Nowe terminy: {len(new)}. Sprawdź dostępność w portalu.", "slots")
+                ordered = sorted(new, key=lambda slot: slot["start"])
+                times = [
+                    datetime.fromisoformat(slot["start"]).strftime("%d.%m %H:%M")
+                    for slot in ordered[:3]
+                ]
+                remaining = len(ordered) - len(times)
+                suffix = f" i +{remaining}" if remaining else ""
+                body = (
+                    f"PORD Gdańsk · {len(ordered)} nowych terminów. Najbliższe: "
+                    f"{', '.join(times)}{suffix}. Sprawdź portal."
+                )
+                return self.push.payload("Nowe terminy praktyczne", body, "slots")
             new = self.store.record_matches(config.profile_id, matches, payload)
-            self.store.event("match" if new else "check", f"{start} – {end}: {len(matches)} pasujących, {len(new)} nowych.")
+            self.store.event("match" if new else "check", f"Kalendarz od {start}: {len(matches)} pasujących, {len(new)} nowych.")
             self.next_check = at + config.interval_seconds
             self.store.save_schedule_timing(at, self.next_check)
         except PortalError as exc:

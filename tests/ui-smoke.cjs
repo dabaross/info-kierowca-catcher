@@ -6,7 +6,7 @@ const dom=new JSDOM(fs.readFileSync(path.join(root,'index.html'),'utf8'),{url:'h
 const w=dom.window;let signed=false, offline=false, saved;
 const range={date_from:'2026-10-12',date_to:'2026-10-16',time_from:'07:00',time_to:'09:00',weekdays:[0,1,2,3,4]};
 const state={session:{active:true,generation:1,connected_at:Date.now()/1000,message:'Sesja potwierdzona.',profiles:[{id:'profile',label:'Kategoria B · PKK …1234'}]},login:null,
-  monitor:{config:{center_id:43,profile_id:'profile',ranges:[range],interval_seconds:1200},enabled:false,state:'PAUSED',slots:[],windows:[],windows_total:1,next_check:0,message:'Wstrzymany',last_check:null,http_status:null},events:[],push:{public_key:'abc',devices:0}};
+  monitor:{config:{center_id:43,profile_id:'profile',ranges:[range],interval_seconds:1200},enabled:false,state:'PAUSED',slots:[],calendar:null,next_check:0,message:'Wstrzymany',last_check:null,http_status:null},events:[],push:{public_key:'abc',devices:0}};
 w.fetch=async(url,opts)=>{
  if(offline)throw new Error('offline');
  let status=200,data={ok:true};

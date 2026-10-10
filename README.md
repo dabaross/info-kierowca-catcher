@@ -4,10 +4,10 @@ Wersja 1.0: działający wcześniej proces logowania mObywatel na iPhonie → Ch
 
 ## Aktualizacja istniejącego VPS
 
-Pobierz `info-kierowca-app-pord43-2026-10-08.zip` do `~/Downloads` na komputerze. W terminalu komputera:
+Pobierz `info-kierowca-app-onecenter-2026-10-10.zip` do `~/Downloads` na komputerze. W terminalu komputera:
 
 ```bash
-scp -i ~/Downloads/ssh-key-2026-10-06.key ~/Downloads/info-kierowca-app-pord43-2026-10-08.zip ubuntu@130.61.102.33:/home/ubuntu/
+scp -i ~/Downloads/ssh-key-2026-10-06.key ~/Downloads/info-kierowca-app-onecenter-2026-10-10.zip ubuntu@130.61.102.33:/home/ubuntu/
 ssh -i ~/Downloads/ssh-key-2026-10-06.key ubuntu@130.61.102.33
 ```
 
@@ -18,14 +18,14 @@ cd /home/ubuntu/info-kierowca-app
 bash backup.sh
 cd /home/ubuntu
 cp -a info-kierowca-app info-kierowca-app.rollback
-unzip -o info-kierowca-app-pord43-2026-10-08.zip
+unzip -o info-kierowca-app-onecenter-2026-10-10.zip
 cd info-kierowca-app
 bash update.sh
 ```
 
 Skrypt kopiuje konfigurację ze starego `/home/ubuntu/info-login-poc/.env`, jeżeli nowy folder jeszcze jej nie ma. Buduje obraz przed zmianą kontenerów i uruchamia ten sam projekt Compose `info-login-poc`, dzięki czemu zachowuje wolumeny Caddy. Stare źródła zostają w poprzednim folderze. Nie używaj `docker compose down -v`, bo usuwa dane.
 
-Paczka `info-kierowca-app-pord43-2026-10-08.zip` zawiera pliki aplikacji, ale celowo nie zawiera `.env`, bazy, kluczy Web Push ani certyfikatów Caddy. Wypakuj ją do istniejącego katalogu aplikacji bez usuwania plików; aktualizacja używa dotychczasowych wolumenów `app_data`, `caddy_data` i `caddy_config`.
+Paczka `info-kierowca-app-onecenter-2026-10-10.zip` zawiera pliki aplikacji, ale celowo nie zawiera `.env`, bazy, kluczy Web Push ani certyfikatów Caddy. Wypakuj ją do istniejącego katalogu aplikacji bez usuwania plików; aktualizacja używa dotychczasowych wolumenów `app_data`, `caddy_data` i `caddy_config`.
 
 Jeśli aktualizacja wymaga cofnięcia, zachowaj nowy katalog, przywróć kopię źródeł i przebuduj aplikację:
 
@@ -56,14 +56,15 @@ Jeżeli nie masz `unzip`: `sudo apt-get install -y unzip`.
 - Jeden ośrodek i jeden profil PKK naraz; maksymalnie 10 przedziałów. Całość mieści się w okresie 60 dni.
 - Ta wersja obsługuje wyłącznie PORD Gdańsk (ID 43). Jeżeli dotychczasowa konfiguracja wskazuje inny ośrodek, pozostaje zapisana, ale wymaga wybrania Gdańska przed wznowieniem odczytów.
 - Termin spełnia **dowolny jeden** kompletny przedział: data ORAZ dzień tygodnia ORAZ godzina. Granice włącznie. Godziny w `Europe/Warsaw`, z obsługą zmiany czasu. Zakres przez północ trzeba rozdzielić na dwa przedziały.
-- Tylko przyszłe egzaminy praktyczne z wolnymi miejscami. Profil i kategoria pochodzą z zalogowanego konta. Lista ośrodków jest lokalnym katalogiem referencyjnym i może wymagać aktualizacji.
-- Nakładające się przedziały nie dublują wyników ani powiadomień. Termin identyfikowany jest przez ośrodek i identyfikator egzaminu. Ten sam termin dla tego samego profilu nie wywołuje ponownego alertu przez 60 dni, także po restarcie lub zmianie filtrów.
+- Tylko przyszłe egzaminy praktyczne kategorii B z wolnymi miejscami. Profil kategorii B pochodzi z zalogowanego konta; profile innych kategorii nie mogą uruchomić monitoringu. Lista ośrodków jest lokalnym katalogiem referencyjnym i może wymagać aktualizacji.
+- Nakładające się przedziały nie dublują wyników ani powiadomień. Termin identyfikowany jest przez ośrodek i identyfikator egzaminu. Trwała deduplikacja dotyczy terminów, które pasowały do filtrów w chwili odczytu; termin wcześniej odfiltrowany nie jest oznaczany jako widziany i może wywołać alert po późniejszym rozszerzeniu filtrów. Ostatni kalendarz jest trwale zapisany jako jedna migawka per profil, więc panel może pokazać go po restarcie lub ponownym logowaniu. Każdy udany odczyt zastępuje poprzednią migawkę, dzięki czemu zniknięte terminy nie pozostają w panelu. Termin już zgłoszony dla danego profilu nie wywołuje ponownego alertu przez 60 dni.
 - Domyślnie jeden odczyt terminarza co 20 minut (3 razy na godzinę); można wybrać 15, 20, 30 albo 60 minut. Backend odrzuca interwał poniżej 15 minut. Zapisane wcześniej ustawienia 6/10 minut migrują do 20 minut; pozostałe preferencje są zachowane. Po aktualizacji już włączony monitor bez zapisanego czasu poprzedniego odczytu czeka jeden pełny interwał, a następnie wraca do harmonogramu. Poprzednia wersja nie utrwalała czasu ostatniego udanego odczytu, więc przed pierwszym nowym HTTP 200 panel nie może pokazać historycznego czasu. Kolejne udane odczyty i plan następnej próby są trwałe. Po błędzie innym niż 400/429 dotychczasowe wykładnicze ponawianie zaczyna się po 6 minutach i rośnie do maksymalnie 60 minut; to tryb błędu, nie skonfigurowany normalny interwał.
-- Odczyt API obejmuje okna do 20 dni, sprawdzane kolejno. Przy 3 oknach i odstępie 20 minut pełny cykl trwa około 60 minut. Przerwy między przedziałami mogą być objęte odczytem, lecz są odfiltrowane z wyników.
+- Jedna zaplanowana próba terminarza wykonuje jeden POST `OneCenterExam` ze `startDate` równym najwcześniejszej przyszłej dacie interesującego okresu, liczonej względem bieżącej daty w Polsce. Nie ma rotacji ani odrzucania wyników według granic 20-dniowych okien: wszystkie dni i egzaminy zwrócone w odpowiedzi są przetwarzane, a dopiero potem stosowane są filtry użytkownika. Panel i jedna trwała migawka kalendarza pokazują daty jawnie wymienione w ostatniej odpowiedzi; każdy udany odczyt zastępuje poprzednią migawkę. Nie uznajemy całego zakresu filtrów za sprawdzony: znamy konkretny przykład odpowiedzi od 12 października do 30 listopada, ale maksymalny/pełny zasięg dla innych dat i znaczenie `startDatePointerForCalendar` wymagają dalszej weryfikacji.
 - Odczyt terminarza nie jest jedynym ruchem do portalu: przy aktywnej sesji monitor sprawdza odświeżenie JWT co najmniej co 8 minut, również gdy monitoring terminarza jest wyłączony. Po odpowiedzi odświeżenia innej niż 200/204 (z wyjątkiem 401/403/przekierowań oraz 429, które mają własną obsługę) wykonuje kontrolny GET profilu; profil jest też sprawdzany w procesie logowania (odczyt w przeglądarce, kontrola anonimowa i niezależna weryfikacja klienta HTTP). Przy niezmienionym tokenie to do 7–8 prób odświeżenia na godzinę plus maksymalnie 3 odczyty terminarza na godzinę w normalnej pracy, a GET profilu zależy od niepowodzeń odświeżenia i logowania. Błędy terminarza inne niż 400/429 uruchamiają dodatkowo opisany wyżej backoff. Limity 429, `Retry-After` i `X-RateLimit-Reset` nadal wydłużają oczekiwanie; nie należy przyspieszać prób.
-- `WATCHING` z licznikiem 0 oznacza poprawny HTTP 200 bez pasujących terminów. `NEEDS_LOGIN` wymaga ponownego potwierdzenia sesji, `RATE_LIMITED` pokazuje oczekiwanie z limitu portalu, `NETWORK` oznacza brak odpowiedzi, `SCHEMA` nieznany format, a HTTP 400 ma osobny stan i zatrzymuje dalsze zapytania terminarza. Panel pokazuje ostatni zarejestrowany udany odczyt oraz plan następnej próby; przy blokadzie 400 wyświetla zamiast niego informację, że próby są wstrzymane.
-- Każdy wynik i okno pokazują czas ostatniego odczytu. Brak odczytu lub błąd nie oznaczają braku terminów. Wyniki są migawką, bez gwarancji dostępności w momencie rezerwacji.
-- Lista profili i odczyt terminarza używają ścieżek przechwyconych z oficjalnego panelu. Jedno żądanie POST `MultipleCentersExams` wysyła `organizationId: [43, 42, 53, 73, 9]`, datę początkową, numeryczny indeks kategorii, numer PKK i typ profilu `Pkk`. Z odpowiedzi przetwarzane i pokazywane są wyłącznie terminy z `wordId` 43 i — jeżeli pole występuje — `organizationId` 43. Pozostałe WORD-y nie trafiają do licznika ani powiadomień. Aplikacja nie rezerwuje terminów automatycznie.
+- `WATCHING` przy 0 pasujących terminach oznacza poprawny HTTP 200 bez wyników spełniających filtry. `NEEDS_LOGIN` wymaga ponownego potwierdzenia sesji, `RATE_LIMITED` pokazuje oczekiwanie z limitu portalu, `NETWORK` oznacza brak odpowiedzi, `SCHEMA` nieznany format, a HTTP 400 ma osobny stan i zatrzymuje dalsze zapytania terminarza. Panel pokazuje ostatni zarejestrowany udany odczyt oraz plan następnej próby; przy blokadzie 400 wyświetla zamiast niego informację, że próby są wstrzymane.
+- Każdy wynik i migawka kalendarza pokazują czas ostatniego odczytu. Brak odczytu lub błąd nie oznaczają braku terminów. Wyniki są migawką, bez gwarancji dostępności w momencie rezerwacji.
+- Odczyt kalendarza używa potwierdzonego POST `/bknd/exam/api/v1/Schedules/user/OneCenterExam` z payloadem `startDate`, `organizationId: [43]`, indeksem kategorii z profilu (B = 5), numerem PKK i `profileType: Pkk`. Parser przechodzi po każdym dniu i egzaminie; przyjmuje wyłącznie `examType: Practice`, `organizationId: 43`, kategorię B, niepuste `practiceId`/`practiceDateTime` i dodatnie `placePracticeAmount`. Dzień bez praktyki nie tworzy terminu. Wynik jest deduplikowany po `organizationId` i `practiceId`; nie używa `firstAvailable`. Przy aktualizacji wcześniejsze migawki kalendarza są migrowane do jednej najnowszej migawki per profil. Testy używają anonimowego fixture o opisanej strukturze i liczności 194, a nie pełnego surowego JSON response.
+- Rezerwacja automatyczna jest widoczna w panelu jako wyłączona i niedostępna. Payload `create` został opisany, ale nie ma pełnego URL/metody ani potwierdzonej relacji `examDate` do `practiceExamId`; brakuje też URL/metody/payloadu/odpowiedzi do odczytu istniejącej rezerwacji i statusu płatności. Nie wysyłamy `create`, nie tworzymy rezerwacji ani nie automatyzujemy płatności.
 - Odpowiedź HTTP 400 nie oznacza braku terminów: zatrzymuje automatyczne próby także po restarcie. Blokadę można zdjąć przez zapis konfiguracji lub świadome ponowne uruchomienie monitora. Diagnostyka pokazuje wyłącznie bezpieczny identyfikator walidacji (jeśli portal zwróci rozpoznawalny kod); nie przechowuje treści odpowiedzi. To hipoteza, że lista pięciu ID pomoże — wymaga jednej kontrolowanej próby odczytu po aktualizacji; nie gwarantuje usunięcia błędu 400.
 - Przed wygaśnięciem sesji pokazujemy czas od logowania i wysyłamy przypomnienie po 50 minutach. Nie udajemy znajomości dokładnego czasu wygaśnięcia. Odświeżanie JWT nie gwarantuje przedłużenia całej sesji.
 
@@ -127,7 +128,7 @@ python -m unittest discover -s tests -v
 
 Testy używają mocków API i push: nie tworzą rezerwacji, nie logują się do mObywatela i nie wysyłają rzeczywistych powiadomień. Obejmują wiele przedziałów, granice godzin, zmianę czasu, błędny schemat, limity i ich trwałość, rozróżnienie utraty sesji od awarii sieci, podmianę klienta podczas odczytu, zatrzymanie monitora, deduplikację, kolejkę powiadomień, uwierzytelnianie panelu, ochronę Origin i zapis konfiguracji.
 
-Weryfikacja wydania: 15 testów Python — PASS; test interakcji DOM panelu w jsdom — PASS; start Uvicorn, healthcheck oraz udostępnianie plików PWA — PASS. Opcjonalny test DOM: `npm install --no-save jsdom`, następnie `node tests/ui-smoke.cjs` (Node jest potrzebny tylko do tego testu). Podgląd graficzny w Chromium nie został wykonany: środowisko testowe nie pobrało poprawnego archiwum przeglądarki. Obrazu Docker nie zbudowano lokalnie, ponieważ brak demona Docker; skrypt aktualizacji buduje go na VPS przed zmianą działających kontenerów.
+Weryfikacja lokalna: 42 testy Python — PASS. Test interakcji DOM w jsdom nie został uruchomiony w tej sesji (Node.js nie jest zainstalowany); opcjonalne polecenie to `npm install --no-save jsdom`, następnie `node tests/ui-smoke.cjs`. Podgląd graficzny w Chromium i build Docker nie były wykonywane.
 
 Dotychczasowy proces logowania został potwierdzony przez właściciela na VPS. Nowe pobieranie terminarza i dostarczenie push wymagają próby na zalogowanym koncie i telefonie po wdrożeniu. Nie deklarujemy przetestowania tego konta ani obrazu ARM64 w środowisku developerskim. API Info-Kierowca jest nieudokumentowaną integracją i może się zmienić; błąd `SCHEMA` wymaga aktualizacji adaptera, `UPSTREAM` sprawdzenia diagnostyki. Nie przyspieszaj zapytań w odpowiedzi na błąd 429.
 

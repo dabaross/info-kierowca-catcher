@@ -4,7 +4,6 @@ from collections.abc import Mapping
 import hashlib
 import hmac
 import time
-from contextlib import asynccontextmanager
 from datetime import date
 from email.utils import parsedate_to_datetime
 
@@ -13,8 +12,8 @@ import httpx
 from .core import INFO_ORIGIN, PROFILE_PATH, profile_response_valid
 from .models import CATEGORIES, PORD_GDANSK_ID
 
-SCHEDULE_PATH = "/bknd/exam/api/v1/Schedules/user/MultipleCentersExams"
-SCHEDULE_CENTER_IDS = [43, 42, 53, 73, 9]
+SCHEDULE_PATH = "/bknd/exam/api/v1/Schedules/user/OneCenterExam"
+LEGACY_SCHEDULE_PATH = "/bknd/exam/api/v1/Schedules/user/MultipleCentersExams"
 REFRESH_PATH = "/bknd/auth/api/v1/jwt/refresh"
 REFRESH_INTERVAL_SECONDS = 8 * 60
 ALLOWED = {("GET", PROFILE_PATH), ("GET", REFRESH_PATH), ("POST", SCHEDULE_PATH)}
@@ -66,7 +65,7 @@ def backoff_until(headers, now):
 def build_schedule_payload(profile: dict, start: date) -> dict:
     return {
         "startDate": start.isoformat(),
-        "organizationId": SCHEDULE_CENTER_IDS.copy(),
+        "organizationId": [PORD_GDANSK_ID],
         "category": CATEGORIES.index(profile["category"]),
         "profileNumber": profile["number"],
         "profileType": "Pkk",
@@ -129,6 +128,8 @@ class Sessions:
             raise ValueError("Endpoint not allowed")
         now = time.time()
         until = self.store.cooldown(path)
+        if path == SCHEDULE_PATH:
+            until = max(until, self.store.cooldown(LEGACY_SCHEDULE_PATH))
         if until > now:
             raise PortalError("RATE_LIMITED", until=until)
         # Persist even on failures/restarts, so UI toggles cannot bypass rate limits.

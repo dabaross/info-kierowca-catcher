@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -63,17 +64,13 @@ class MonitorConfig(BaseModel):
             raise ValueError("Wszystkie przedziały muszą mieścić się w okresie 60 dni.")
         return self
 
-    def windows(self, today: date):
-        days = sorted({r.date_from + timedelta(days=i) for r in self.ranges
-                       for i in range((r.date_to-r.date_from).days+1)
-                       if r.date_from + timedelta(days=i) >= today})
-        result = []
-        while days:
-            start = days[0]
-            end = min(start + timedelta(days=19), days[-1])
-            result.append((start, end))
-            days = [d for d in days if d > end]
-        return result
+    def start_date(self, today: date) -> date | None:
+        starts = [
+            max(range_.date_from, today)
+            for range_ in self.ranges
+            if range_.date_to >= today
+        ]
+        return min(starts) if starts else None
 
     def matches(self, slot: dict, now: datetime) -> bool:
         dt = datetime.fromisoformat(slot["start"]).astimezone(WARSAW)
@@ -82,68 +79,100 @@ class MonitorConfig(BaseModel):
                         and r.time_from <= dt.time().replace(tzinfo=None) <= r.time_to for r in self.ranges))
 
 
-def parse_schedule(data, expected_category: str) -> list[dict]:
-    """Normalize the confirmed multi-center response without hiding schema changes."""
-    if not isinstance(data, list):
-        raise ValueError("schedule_centers")
-    found = {}
-    expected_category = expected_category.upper()
-    for center in data:
-        if not isinstance(center, dict) or "wordId" not in center:
-            raise ValueError("schedule_center")
+def parse_one_center_schedule(data, expected_category: str) -> list[dict]:
+    """Normalize all practical exams in a one-center calendar response."""
+    if not isinstance(data, Mapping):
+        raise ValueError("one_center")
+    if "startDatePointerForCalendar" not in data or data["startDatePointerForCalendar"] is None:
+        raise ValueError("one_center_calendar_pointer")
+
+    days = data.get("examCollectionForDay")
+    if not isinstance(days, list):
+        raise ValueError("one_center_days")
+    found: dict[str, dict] = {}
+
+    for day in days:
+        if not isinstance(day, Mapping) or not isinstance(day.get("date"), str):
+            raise ValueError("one_center_day")
         try:
-            center_id = int(center["wordId"])
-        except (TypeError, ValueError, OverflowError):
-            raise ValueError("schedule_center_id") from None
-        if center_id != PORD_GDANSK_ID:
-            continue
-        if ("wordName" not in center or "examCollectionForDay" not in center
-                or not isinstance(center["examCollectionForDay"], list)):
-            raise ValueError("schedule_center")
-        center_name = str(center["wordName"])
-        for item in center["examCollectionForDay"]:
-            if not isinstance(item, dict):
-                raise ValueError("schedule_item")
-            organization_id = item.get("organizationId")
-            if organization_id is not None:
-                if isinstance(organization_id, bool):
-                    raise ValueError("schedule_organization_id")
-                try:
-                    organization_id = int(organization_id)
-                except (TypeError, ValueError, OverflowError):
-                    raise ValueError("schedule_organization_id") from None
-                if organization_id != PORD_GDANSK_ID:
-                    continue
-            if "examType" not in item:
-                raise ValueError("schedule_item")
-            if item["examType"] != "Practice":
+            calendar_date = date.fromisoformat(day["date"])
+        except ValueError:
+            raise ValueError("one_center_day_date") from None
+        collections = day.get("examCollections")
+        if not isinstance(collections, list):
+            raise ValueError("one_center_collections")
+        for item in collections:
+            if not isinstance(item, Mapping):
+                raise ValueError("one_center_exam")
+            exam_type = item.get("examType")
+            if not isinstance(exam_type, str):
+                raise ValueError("one_center_exam_type")
+            if exam_type not in {"Practice", "Theoretical", "Theory"}:
+                raise ValueError("one_center_exam_type")
+            if exam_type in {"Theoretical", "Theory"}:
                 continue
-            required = {"practiceId", "practiceDateTime", "placePracticeAmount", "category"}
+            required = {
+                "organizationId", "category", "practiceId", "practiceDateTime",
+                "placePracticeAmount",
+            }
             if not required.issubset(item):
-                raise ValueError("schedule_practice")
+                raise ValueError("one_center_practice")
             practice_id = item["practiceId"]
             practice_date_time = item["practiceDateTime"]
             if practice_id is None or not str(practice_id).strip() or not practice_date_time:
                 continue
             if not isinstance(practice_date_time, str):
-                raise ValueError("schedule_datetime")
+                raise ValueError("one_center_datetime")
+            if not isinstance(practice_id, (str, int)) or isinstance(practice_id, bool):
+                raise ValueError("one_center_practice_id")
+            organization_id = item["organizationId"]
+            if isinstance(organization_id, bool) or not isinstance(organization_id, int):
+                raise ValueError("one_center_organization_id")
+            category = item["category"]
+            if not isinstance(category, str):
+                raise ValueError("one_center_category")
             try:
-                places = int(item["placePracticeAmount"] or 0)
+                if (isinstance(item["placePracticeAmount"], bool)
+                        or not isinstance(item["placePracticeAmount"], int)):
+                    raise ValueError()
+                places = int(item["placePracticeAmount"])
             except (TypeError, ValueError, OverflowError):
-                raise ValueError("schedule_places") from None
+                raise ValueError("one_center_places") from None
+            try:
+                dt = datetime.fromisoformat(practice_date_time)
+            except ValueError:
+                raise ValueError("one_center_datetime") from None
+            dt = dt.replace(tzinfo=WARSAW) if dt.tzinfo is None else dt.astimezone(WARSAW)
+            if dt.date() != calendar_date:
+                raise ValueError("one_center_day_mismatch")
             if places <= 0:
                 continue
-            if not isinstance(item["category"], str):
-                raise ValueError("schedule_category")
-            item_category = item["category"].upper()
-            if item_category != expected_category:
+            if (organization_id != PORD_GDANSK_ID or category != "B"
+                    or expected_category != "B"):
                 continue
-            dt = datetime.fromisoformat(practice_date_time)
-            dt = dt.replace(tzinfo=WARSAW) if dt.tzinfo is None else dt.astimezone(WARSAW)
             practice_id = str(practice_id)
-            key = f"{center_id}:{practice_id}"
-            found[key] = {"key": key, "center_id": center_id,
-                          "center_name": center_name[:160], "start": dt.isoformat(),
-                          "places": places, "category": item_category,
-                          "practice_id": practice_id}
-    return sorted(found.values(), key=lambda s: s["start"])
+            key = f"{organization_id}:{practice_id}"
+            found[key] = {
+                "key": key, "center_id": organization_id,
+                "center_name": str(item.get("organizationName") or "PORD Gdańsk")[:160],
+                "start": dt.isoformat(),
+                "places": places, "category": "B", "practice_id": practice_id,
+            }
+    return sorted(found.values(), key=lambda slot: slot["start"])
+
+
+def one_center_calendar_dates(data) -> list[date]:
+    if not isinstance(data, Mapping):
+        raise ValueError("one_center")
+    days = data.get("examCollectionForDay")
+    if not isinstance(days, list):
+        raise ValueError("one_center_days")
+    dates = []
+    for day in days:
+        if not isinstance(day, Mapping) or not isinstance(day.get("date"), str):
+            raise ValueError("one_center_day")
+        try:
+            dates.append(date.fromisoformat(day["date"]))
+        except ValueError:
+            raise ValueError("one_center_day_date") from None
+    return sorted(set(dates))

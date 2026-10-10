@@ -29,6 +29,7 @@ class Store:
           CREATE TABLE IF NOT EXISTS settings(owner TEXT PRIMARY KEY, config TEXT NOT NULL, enabled INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, owner TEXT, at REAL, kind TEXT, message TEXT);
           CREATE TABLE IF NOT EXISTS seen(owner TEXT, profile TEXT, key TEXT, at REAL, PRIMARY KEY(owner,profile,key));
+          CREATE TABLE IF NOT EXISTS schedule_calendars(owner TEXT, profile TEXT, payload TEXT NOT NULL, at REAL NOT NULL, PRIMARY KEY(owner,profile));
           CREATE TABLE IF NOT EXISTS subscriptions(owner TEXT, id TEXT, encrypted TEXT, PRIMARY KEY(owner,id));
           CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY, owner TEXT, sub_id TEXT, payload TEXT, due REAL, expires REAL, tries INTEGER DEFAULT 0);
           CREATE TABLE IF NOT EXISTS limits(owner TEXT, endpoint TEXT, until REAL, PRIMARY KEY(owner,endpoint));
@@ -36,6 +37,21 @@ class Store:
           CREATE TABLE IF NOT EXISTS schedule_timing(owner TEXT PRIMARY KEY, last_success REAL, next_check REAL NOT NULL);
           CREATE TABLE IF NOT EXISTS panel_sessions(token TEXT PRIMARY KEY, owner TEXT, expires REAL, password_version TEXT);
         """)
+        legacy_snapshots = self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schedule_snapshots'"
+        ).fetchone()
+        if legacy_snapshots:
+            with self.db:
+                self.db.execute("""
+                    INSERT OR IGNORE INTO schedule_calendars(owner,profile,payload,at)
+                    SELECT legacy.owner, legacy.profile, legacy.payload, legacy.at
+                    FROM schedule_snapshots AS legacy
+                    WHERE legacy.at = (
+                        SELECT MAX(latest.at) FROM schedule_snapshots AS latest
+                        WHERE latest.owner = legacy.owner AND latest.profile = legacy.profile
+                    )
+                """)
+                self.db.execute("DROP TABLE schedule_snapshots")
         self.db.execute("INSERT OR IGNORE INTO settings VALUES (?,?,0)", (owner, MonitorConfig().model_dump_json()))
         self.db.commit()
 
@@ -98,6 +114,36 @@ class Store:
                 "ON CONFLICT(owner) DO UPDATE SET "
                 "last_success=excluded.last_success,next_check=excluded.next_check",
                 (self.owner, last_success, next_check),
+            )
+
+    def schedule_calendar(self, profile):
+        rows = self.db.execute(
+            "SELECT payload,at FROM schedule_calendars "
+            "WHERE owner=? AND profile=?",
+            (self.owner, profile),
+        ).fetchone()
+        if not rows:
+            return None
+        payload = json.loads(rows["payload"])
+        return {
+            "requested_start": payload["requested_start"],
+            "calendar_dates": payload["calendar_dates"],
+            "at": rows["at"],
+            "slots": payload["slots"],
+        }
+
+    def save_schedule_calendar(self, profile, requested_start, calendar_dates, slots, at):
+        payload = json.dumps({
+            "requested_start": requested_start,
+            "calendar_dates": calendar_dates,
+            "slots": slots,
+        })
+        with self.db:
+            self.db.execute(
+                "INSERT INTO schedule_calendars VALUES (?,?,?,?) "
+                "ON CONFLICT(owner,profile) DO UPDATE SET "
+                "payload=excluded.payload,at=excluded.at",
+                (self.owner, profile, payload, at),
             )
 
     def subscribe(self, id, subscription):
